@@ -1102,6 +1102,70 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
         );
       });
 
+      describe("Mastra Code model inventories", () => {
+        const cachedProvider = {
+          instanceId: ProviderInstanceId.make("mastra-work"),
+          driver: ProviderDriverKind.make("mastraCode"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-09-27T00:00:00.000Z",
+          version: "0.42.3-alpha.4",
+          models: [
+            {
+              slug: "openai-codex/gpt-5",
+              name: "openai-codex/gpt-5",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+          slashCommands: [],
+          skills: [],
+        } satisfies ServerProvider;
+
+        it("keeps a cached list while authentication or an installed probe is unresolved", () => {
+          const unresolved = [
+            {
+              ...cachedProvider,
+              status: "warning",
+              installed: false,
+              auth: { status: "unknown" },
+              models: [],
+            },
+            {
+              ...cachedProvider,
+              status: "error",
+              auth: { status: "unknown" },
+              models: [],
+            },
+          ] satisfies ReadonlyArray<ServerProvider>;
+
+          for (const provider of unresolved) {
+            assert.deepStrictEqual(
+              mergeProviderSnapshot(cachedProvider, provider).models,
+              cachedProvider.models,
+            );
+          }
+        });
+
+        it("clears cached models after sign-out, disable, or successful empty discovery", () => {
+          const authoritativeEmpty = {
+            ...cachedProvider,
+            models: [],
+          } satisfies ServerProvider;
+          const providers = [
+            { ...authoritativeEmpty, status: "error", auth: { status: "unauthenticated" } },
+            { ...authoritativeEmpty, status: "disabled", enabled: false },
+            authoritativeEmpty,
+          ] satisfies ReadonlyArray<ServerProvider>;
+
+          for (const provider of providers) {
+            assert.deepStrictEqual(mergeProviderSnapshot(cachedProvider, provider).models, []);
+          }
+        });
+      });
+
       describe("Antigravity model inventories", () => {
         const previousProvider = {
           instanceId: ProviderInstanceId.make("antigravity-personal"),
@@ -2658,6 +2722,7 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
                 "codex",
                 "cursor",
                 "grok",
+                "mastraCode",
                 "opencode",
               ]);
               assert.strictEqual(cursorProvider?.enabled, false);

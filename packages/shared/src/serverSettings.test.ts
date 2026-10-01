@@ -13,6 +13,7 @@ import { createModelSelection } from "./model.ts";
 import { resolveProjectScripts, projectScriptsInheritDefaults } from "./projectScripts.ts";
 import {
   applyServerSettingsPatch,
+  isBackgroundTextGenerationSelectionEnabled,
   isModelSelectionProviderEnabled,
   parsePersistedServerObservabilitySettings,
   resolveSourceControlWriterModelSelection,
@@ -429,6 +430,34 @@ describe("serverSettings helpers", () => {
       settings.textGenerationModelSelection,
     );
     expect(settings.sourceControlWriterModelSelection).toBe(sourceControlWriterModelSelection);
+  });
+
+  it("falls back from an interactive Mastra Code source-control writer", () => {
+    const instanceId = ProviderInstanceId.make("mastra-writer");
+    const sourceControlWriterModelSelection = createModelSelection(
+      instanceId,
+      "openai-codex/gpt-5",
+    );
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        ...DEFAULT_SERVER_SETTINGS.providerInstances,
+        [instanceId]: {
+          driver: ProviderDriverKind.make("mastraCode"),
+          enabled: true,
+          config: {},
+        },
+      },
+      sourceControlWriterModelSelection,
+    };
+
+    expect(isModelSelectionProviderEnabled(settings, sourceControlWriterModelSelection)).toBe(true);
+    expect(
+      isBackgroundTextGenerationSelectionEnabled(settings, sourceControlWriterModelSelection),
+    ).toBe(false);
+    expect(resolveSourceControlWriterModelSelection(settings)).toEqual(
+      settings.textGenerationModelSelection,
+    );
   });
 
   it("falls back from an unavailable source control writer provider", () => {

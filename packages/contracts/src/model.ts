@@ -148,6 +148,7 @@ const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
 const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
 const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
 const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
+const MASTRA_CODE_DRIVER_KIND = ProviderDriverKind.make("mastraCode");
 
 export const DEFAULT_MODEL = "gpt-6-astra";
 
@@ -221,5 +222,6 @@ export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>>
   [CLAUDE_DRIVER_KIND]: "Claude",
   [CURSOR_DRIVER_KIND]: "Cursor",
   [GROK_DRIVER_KIND]: "Grok",
+  [MASTRA_CODE_DRIVER_KIND]: "Mastra Code",
   [OPENCODE_DRIVER_KIND]: "OpenCode",
 };

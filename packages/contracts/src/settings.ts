@@ -889,6 +889,45 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
 );
 export type OpenCodeSettings = typeof OpenCodeSettings.Type;
 
+export const MastraCodeSettings = makeProviderSettingsSchema(
+  {
+    // Keep the new ACP harness opt-in until its CLI is installed and the
+    // dedicated Codex OAuth profile has been configured.
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    binaryPath: makeBinaryPathSetting("mastracode")
+      .check(
+        Schema.makeFilter(
+          (value) =>
+            value.startsWith("/") ||
+            /^\\\\(?![.?]\\)[^\\]+\\[^\\]+(?:\\|$)/.test(value) ||
+            (/^[A-Za-z]:/.test(value) && value[2] === "\\") ||
+            (!/[\\/]/.test(value) &&
+              !/^[A-Za-z]:/.test(value) &&
+              value !== "." &&
+              value !== "..") ||
+            "Use a command from PATH or an absolute path; relative paths can resolve inside project workspaces.",
+        ),
+      )
+      .pipe(
+        Schema.annotateKey({
+          title: "Binary path",
+          description:
+            "Command from PATH or absolute path to the Mastra Code CLI used for ACP sessions.",
+          providerSettingsForm: { placeholder: "mastracode", clearWhenEmpty: "omit" },
+        }),
+      ),
+    customModels: Schema.Array(CustomModelSetting).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+  },
+  { order: ["binaryPath"] },
+);
+export type MastraCodeSettings = typeof MastraCodeSettings.Type;
+
 /**
  * A read-only quota source outside this environment's provider CLIs. The
  * only kind today is a CLIProxyAPI hub, whose management API reports the
@@ -1283,6 +1322,7 @@ export const ServerSettings = Schema.Struct({
     grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     antigravity: AntigravitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    mastraCode: MastraCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // New driver-agnostic instance map. Keyed by `ProviderInstanceId`; values
   // are `ProviderInstanceConfig` envelopes. The driver-specific config blob
@@ -1461,6 +1501,12 @@ const OpenCodeSettingsPatch = Schema.Struct({
   customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
 });
 
+const MastraCodeSettingsPatch = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  binaryPath: Schema.optionalKey(TrimmedString),
+  customModels: Schema.optionalKey(Schema.Array(CustomModelSetting)),
+});
+
 export const ServerSettingsPatch = Schema.Struct({
   worktreeCleanup: Schema.optionalKey(
     Schema.NullOr(
@@ -1571,6 +1617,7 @@ export const ServerSettingsPatch = Schema.Struct({
       grok: Schema.optionalKey(GrokSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
       antigravity: Schema.optionalKey(AntigravitySettingsPatch),
+      mastraCode: Schema.optionalKey(MastraCodeSettingsPatch),
     }),
   ),
   // Whole-map replacement for the new instance config. Patching individual

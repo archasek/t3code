@@ -1,4 +1,5 @@
 import {
+  DEFAULT_SERVER_SETTINGS,
   isProviderDriverKind,
   isProviderAvailable,
   resolveProviderInstanceEnabled,
@@ -6,7 +7,7 @@ import {
   type ProjectId,
   type ProjectScopedServerSettingKey,
   type ProjectSettingsOverrides,
-  type ProviderDriverKind,
+  ProviderDriverKind,
   type ServerProvider,
   ServerSettings,
   type ServerSettingsPatch,
@@ -81,22 +82,37 @@ export function isModelSelectionProviderEnabled(
   );
 }
 
+/** Background text-generation tasks must not start an interactive coding harness. */
+export function isBackgroundTextGenerationSelectionEnabled(
+  settings: ServerSettings,
+  selection: ModelSelection,
+): boolean {
+  const mastraCode = ProviderDriverKind.make("mastraCode");
+  const instance = settings.providerInstances[selection.instanceId];
+  if (selection.instanceId === mastraCode || instance?.driver === mastraCode) return false;
+  return isModelSelectionProviderEnabled(settings, selection);
+}
+
 export function resolveSourceControlWriterModelSelection(
   settings: ServerSettings,
   providers?: ReadonlyArray<ServerProvider>,
 ): ModelSelection {
   const selection = settings.sourceControlWriterModelSelection;
-  if (!selection || !isModelSelectionProviderEnabled(settings, selection)) {
-    return settings.textGenerationModelSelection;
+  const fallback = isBackgroundTextGenerationSelectionEnabled(
+    settings,
+    settings.textGenerationModelSelection,
+  )
+    ? settings.textGenerationModelSelection
+    : DEFAULT_SERVER_SETTINGS.textGenerationModelSelection;
+  if (!selection || !isBackgroundTextGenerationSelectionEnabled(settings, selection)) {
+    return fallback;
   }
   if (providers === undefined) {
     return selection;
   }
 
   const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
-  return provider?.enabled === true && isProviderAvailable(provider)
-    ? selection
-    : settings.textGenerationModelSelection;
+  return provider?.enabled === true && isProviderAvailable(provider) ? selection : fallback;
 }
 
 export interface PersistedServerObservabilitySettings {

@@ -7,6 +7,7 @@ import {
   ClientSettingsPatch,
   ClaudeSettings,
   DEFAULT_SERVER_SETTINGS,
+  MastraCodeSettings,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -19,6 +20,33 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+const decodeMastraCodeSettings = Schema.decodeUnknownSync(MastraCodeSettings);
+
+describe("MastraCodeSettings binary path", () => {
+  it("accepts an executable name or an absolute path", () => {
+    expect(decodeMastraCodeSettings({ binaryPath: "mastracode" }).binaryPath).toBe("mastracode");
+    expect(decodeMastraCodeSettings({ binaryPath: "/opt/mastra/bin/mastracode" }).binaryPath).toBe(
+      "/opt/mastra/bin/mastracode",
+    );
+    expect(
+      decodeMastraCodeSettings({ binaryPath: "C:\\Program Files\\Mastra Code\\mastracode.exe" })
+        .binaryPath,
+    ).toBe("C:\\Program Files\\Mastra Code\\mastracode.exe");
+    expect(
+      decodeMastraCodeSettings({ binaryPath: "\\\\server\\share\\mastracode.exe" }).binaryPath,
+    ).toBe("\\\\server\\share\\mastracode.exe");
+  });
+
+  it("rejects relative paths that would resolve inside the ACP workspace", () => {
+    expect(() => decodeMastraCodeSettings({ binaryPath: "./bin/mastracode" })).toThrow();
+    expect(() => decodeMastraCodeSettings({ binaryPath: "..\\tools\\mastracode.exe" })).toThrow();
+    expect(() =>
+      decodeMastraCodeSettings({ binaryPath: "C:/project/bin/mastracode.exe" }),
+    ).toThrow();
+    expect(() => decodeMastraCodeSettings({ binaryPath: "\\\\workspace" })).toThrow();
+    expect(() => decodeMastraCodeSettings({ binaryPath: "\\\\.\\pipe\\mastracode.exe" })).toThrow();
+  });
+});
 
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {

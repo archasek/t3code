@@ -81,6 +81,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { ExpandableText } from "./ExpandableText";
+import { MastraCodeSetupSection } from "./MastraCodeSetupSection";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { UsageProviderSettings } from "./UsageProviderSettings";
 import { ProviderSetupSection, readAntigravityAuthMethod } from "./ProviderSetupSection";
@@ -986,6 +987,14 @@ export function EnvironmentProviderSettings({
                   },
                 })
               }
+            />
+          ) : mode === "editor" && row.driver === "mastraCode" ? (
+            <MastraCodeSetupSection
+              environmentId={environmentId}
+              environmentLabel={environmentLabel}
+              instanceId={row.instanceId}
+              provider={liveProvider}
+              readOnly={readOnly}
             />
           ) : null
         }

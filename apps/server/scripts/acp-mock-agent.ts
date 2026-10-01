@@ -44,6 +44,7 @@ const emitLateUpdateAfterCancel = process.env.T3_ACP_EMIT_LATE_UPDATE_AFTER_CANC
 const omitXAiPromptCompleteStopReason =
   process.env.T3_ACP_OMIT_XAI_PROMPT_COMPLETE_STOP_REASON === "1";
 const failLoadSession = process.env.T3_ACP_FAIL_LOAD_SESSION === "1";
+const failLoadSessionAfterReplay = process.env.T3_ACP_FAIL_LOAD_SESSION_AFTER_REPLAY === "1";
 const emitLoadReplay = process.env.T3_ACP_EMIT_LOAD_REPLAY === "1";
 const hangLoadSessionAfterReplay = process.env.T3_ACP_HANG_LOAD_SESSION_AFTER_REPLAY === "1";
 const delayLoadSessionAfterReplay = process.env.T3_ACP_DELAY_LOAD_SESSION_AFTER_REPLAY === "1";
@@ -501,7 +502,7 @@ const program = Effect.gen(function* () {
       if (failLoadSession) {
         return yield* AcpError.AcpRequestError.internalError("Mock load session failure");
       }
-      if (hangLoadSessionAfterReplay || delayLoadSessionAfterReplay) {
+      if (hangLoadSessionAfterReplay || delayLoadSessionAfterReplay || failLoadSessionAfterReplay) {
         emitLoadReplayNotifications(requestedSessionId);
         yield* agent.client.sessionUpdate({
           sessionId: requestedSessionId,
@@ -511,6 +512,9 @@ const program = Effect.gen(function* () {
           },
         });
         yield* Effect.sleep(loadSessionDelayMs);
+        if (failLoadSessionAfterReplay) {
+          return yield* AcpError.AcpRequestError.internalError("Mock delayed load session failure");
+        }
         return {
           modes: modeState(),
           models: modelState(),
