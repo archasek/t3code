@@ -54,7 +54,7 @@ import { fromJsonStringPretty, fromLenientJson } from "@t3tools/shared/schemaJso
 import {
   applyServerSettingsPatch,
   deriveLegacyProjectOverrides,
-  isModelSelectionProviderEnabled,
+  isBackgroundTextGenerationSelectionEnabled,
 } from "@t3tools/shared/serverSettings";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 
@@ -333,7 +333,7 @@ function restoreUsedProviders(
 }
 
 function resolveTextGenerationProvider(settings: ServerSettings): ServerSettings {
-  return isModelSelectionProviderEnabled(settings, settings.textGenerationModelSelection)
+  return isBackgroundTextGenerationSelectionEnabled(settings, settings.textGenerationModelSelection)
     ? settings
     : fallbackTextGenerationProvider(settings);
 }
@@ -343,12 +343,16 @@ function fallbackTextGenerationProvider(settings: ServerSettings): ServerSetting
   // instance wins over the legacy providers map, which decodes to defaults
   // (codex enabled) when the Providers UI has only written providerInstances.
   const fallbackEntry = Object.entries(settings.providers).find(([driver, provider]) => {
+    if (driver === "mastraCode") return false;
     const instance = settings.providerInstances[ProviderInstanceId.make(driver)];
     return instance === undefined ? provider.enabled : resolveProviderInstanceEnabled(instance);
   });
   const fallback = fallbackEntry ? ProviderDriverKind.make(fallbackEntry[0]) : undefined;
   if (!fallback) {
-    return settings;
+    return {
+      ...settings,
+      textGenerationModelSelection: DEFAULT_SERVER_SETTINGS.textGenerationModelSelection,
+    };
   }
 
   return {

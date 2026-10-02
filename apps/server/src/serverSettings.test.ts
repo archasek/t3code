@@ -691,6 +691,22 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("never selects Mastra Code for background text generation", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      yield* fileSystem.writeFileString(
+        serverConfig.settingsPath,
+        '{"providerInstances":{"mastra-work":{"driver":"mastraCode","enabled":true,"config":{}}},"textGenerationModelSelection":{"instanceId":"mastra-work","model":"openai-codex/gpt-5"}}',
+      );
+
+      const settings = yield* serverSettings.getSettings;
+
+      assert.equal(settings.textGenerationModelSelection.instanceId, "codex");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("keeps unused providers disabled in existing sparse settings files", () =>
     Effect.gen(function* () {
       const serverConfig = yield* ServerConfig.ServerConfig;

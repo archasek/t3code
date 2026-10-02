@@ -2,6 +2,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -88,6 +89,56 @@ describe("resolveProjectSettings", () => {
       settings.textGenerationModelSelection,
     );
     expect(resolved.sources.textGenerationModelSelection).toBe("environment");
+  });
+
+  it("does not route project background text generation through Mastra Code", () => {
+    const instanceId = ProviderInstanceId.make("mastra-project");
+    const selection = createModelSelection(instanceId, "openai-codex/gpt-5");
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        ...DEFAULT_SERVER_SETTINGS.providerInstances,
+        [instanceId]: {
+          driver: ProviderDriverKind.make("mastraCode"),
+          enabled: true,
+          config: {},
+        },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { textGenerationModelSelection: selection },
+      },
+    };
+
+    const resolved = resolveProjectSettings(settings, projectId);
+
+    expect(resolved.settings.textGenerationModelSelection).toEqual(
+      settings.textGenerationModelSelection,
+    );
+    expect(resolved.sources.textGenerationModelSelection).toBe("environment");
+  });
+
+  it("keeps Mastra Code available as an interactive project agent", () => {
+    const instanceId = ProviderInstanceId.make("mastra-project-agent");
+    const selection = createModelSelection(instanceId, "openai-codex/gpt-5");
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        ...DEFAULT_SERVER_SETTINGS.providerInstances,
+        [instanceId]: {
+          driver: ProviderDriverKind.make("mastraCode"),
+          enabled: true,
+          config: {},
+        },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { defaultModelSelection: selection },
+      },
+    };
+
+    const resolved = resolveProjectSettings(settings, projectId);
+
+    expect(resolved.settings.defaultModelSelection).toEqual(selection);
+    expect(resolved.sources.defaultModelSelection).toBe("project");
   });
 
   it("honours the aggregate's own fields only until the server has folded them", () => {

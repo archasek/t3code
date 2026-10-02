@@ -20,6 +20,16 @@ describe("ProviderSettingsForm helpers", () => {
     ]);
   });
 
+  it("exposes Mastra Code as a configurable provider", () => {
+    const mastraCode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("mastraCode")];
+
+    expect(mastraCode).toBeDefined();
+    expect(mastraCode?.label).toBe("Mastra Code");
+    expect(deriveProviderSettingsFields(mastraCode!).map((field) => field.key)).toEqual([
+      "binaryPath",
+    ]);
+  });
+
   it("sources labels and descriptions from schema annotations", () => {
     const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];
     expect(opencode).toBeDefined();

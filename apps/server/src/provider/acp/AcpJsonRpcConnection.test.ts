@@ -32,6 +32,35 @@ const mockRuntimeOptions = {
 } satisfies AcpSessionRuntime.AcpSessionRuntimeOptions;
 
 describe("AcpSessionRuntime", () => {
+  for (const authMethodId of [null, "test"] as const) {
+    it.effect(
+      `preserves startup authentication contract for ${authMethodId ?? "preconfigured auth"}`,
+      () =>
+        Effect.gen(function* () {
+          const startedRequests: Array<{ method: string; payload: unknown }> = [];
+          const runtime = yield* AcpSessionRuntime.make({
+            ...mockRuntimeOptions,
+            authMethodId,
+            requestLogger: (event) =>
+              Effect.sync(() => {
+                if (event.status === "started") {
+                  startedRequests.push({ method: event.method, payload: event.payload });
+                }
+              }),
+          });
+          yield* runtime.start();
+          expect(startedRequests.map((request) => request.method)).toEqual(
+            authMethodId === null
+              ? ["initialize", "session/new"]
+              : ["initialize", "authenticate", "session/new"],
+          );
+          if (authMethodId !== null) {
+            expect(startedRequests[1]?.payload).toEqual({ methodId: authMethodId });
+          }
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
   for (const setupMethod of ["session/new", "session/resume"] as const) {
     it.effect(`buffers root metadata while ${setupMethod} startup is still pending`, () =>
       Effect.gen(function* () {
@@ -1153,6 +1182,38 @@ describe("AcpSessionRuntime", () => {
       Effect.scoped,
       Effect.provide(NodeServices.layer),
       TestClock.withLive,
+    ),
+  );
+
+  it.effect("does not accept replay idle before a delayed session/load error", () =>
+    Effect.gen(function* () {
+      const runtime = yield* AcpSessionRuntime.AcpSessionRuntime;
+      const error = yield* runtime.start().pipe(Effect.flip);
+
+      expect(error._tag).toBe("AcpRequestError");
+    }).pipe(
+      Effect.provide(
+        AcpSessionRuntime.layer({
+          authMethodId: "test",
+          spawn: {
+            command: mockAgentCommand,
+            args: mockAgentArgs,
+            env: {
+              T3_ACP_FAIL_LOAD_SESSION_AFTER_REPLAY: "1",
+              T3_ACP_LOAD_SESSION_DELAY_MS: "200",
+            },
+          },
+          cwd: process.cwd(),
+          resumeSessionId: "mock-session-1",
+          resumeMethod: "load",
+          sessionLoadRequireRpcResponse: true,
+          sessionLoadReplayIdleGap: "50 millis",
+          sessionLoadTimeout: "1 second",
+          clientInfo: { name: "t3-test", version: "0.0.0" },
+        }),
+      ),
+      Effect.scoped,
+      Effect.provide(NodeServices.layer),
     ),
   );
 

@@ -12,7 +12,10 @@ import {
   type ThreadEnvMode,
   type WorktreeCleanupRules,
 } from "@t3tools/contracts";
-import { isModelSelectionProviderEnabled } from "./serverSettings.ts";
+import {
+  isBackgroundTextGenerationSelectionEnabled,
+  isModelSelectionProviderEnabled,
+} from "./serverSettings.ts";
 
 /**
  * Where a project-scoped value came from. The order is the priority order:
@@ -175,7 +178,15 @@ function resolveProjectOverrides(
     // A model on a disabled provider falls back to the environment, like the
     // environment-level guards do for these keys.
     if (
-      (key === "textGenerationModelSelection" || key === "defaultModelSelection") &&
+      key === "textGenerationModelSelection" &&
+      value !== undefined &&
+      value !== null &&
+      !isBackgroundTextGenerationSelectionEnabled(settings, value as ModelSelection)
+    ) {
+      continue;
+    }
+    if (
+      key === "defaultModelSelection" &&
       value !== undefined &&
       value !== null &&
       !isModelSelectionProviderEnabled(settings, value as ModelSelection)

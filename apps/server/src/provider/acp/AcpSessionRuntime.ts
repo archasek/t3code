@@ -87,6 +87,8 @@ export interface AcpSessionRuntimeOptions {
   readonly resumeMethod?: "load" | "resume";
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
+  /** Require the agent's actual session/load response instead of accepting replay idle. */
+  readonly sessionLoadRequireRpcResponse?: boolean;
   /** Native cancellation waits for the prompt response and the getEvents consumer to drain. */
   readonly cancelBehavior?: "interrupt" | "wait-for-prompt";
   readonly cancelTimeout?: Duration.Input;
@@ -95,7 +97,8 @@ export interface AcpSessionRuntimeOptions {
     readonly name: string;
     readonly version: string;
   };
-  readonly authMethodId: string;
+  /** Null when the agent uses credentials configured outside ACP. */
+  readonly authMethodId: string | null;
   readonly mcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   /** Extra workspace roots the agent may read and write besides `cwd`. */
   readonly additionalDirectories?: ReadonlyArray<string>;
@@ -743,15 +746,17 @@ export const make = (
     const startOnce = Effect.gen(function* () {
       const initializeResult = yield* sendInitialize;
 
-      const authenticatePayload = {
-        methodId: options.authMethodId,
-      } satisfies EffectAcpSchema.AuthenticateRequest;
+      if (options.authMethodId !== null) {
+        const authenticatePayload = {
+          methodId: options.authMethodId,
+        } satisfies EffectAcpSchema.AuthenticateRequest;
 
-      yield* runLoggedRequest(
-        "authenticate",
-        authenticatePayload,
-        acp.agent.authenticate(authenticatePayload),
-      );
+        yield* runLoggedRequest(
+          "authenticate",
+          authenticatePayload,
+          acp.agent.authenticate(authenticatePayload),
+        );
+      }
 
       let sessionId: string;
       let sessionSetupResult:
@@ -827,10 +832,10 @@ export const make = (
           const idleFiber = yield* waitForSessionLoadReplayIdle({
             gateRef: sessionLoadGateRef,
           }).pipe(Effect.forkIn(runtimeScope));
-          const loaded = yield* Effect.raceFirst(
-            acp.agent.loadSession(loadPayload),
-            Fiber.join(idleFiber),
-          ).pipe(
+          const load = options.sessionLoadRequireRpcResponse
+            ? acp.agent.loadSession(loadPayload)
+            : Effect.raceFirst(acp.agent.loadSession(loadPayload), Fiber.join(idleFiber));
+          const loaded = yield* load.pipe(
             Effect.ensuring(Fiber.interrupt(idleFiber).pipe(Effect.ignore)),
             Effect.timeoutOption(sessionLoadTimeout),
             Effect.flatMap(
@@ -839,7 +844,9 @@ export const make = (
                   new EffectAcpErrors.AcpTransportError({
                     operation: "call-rpc",
                     method: "session/load",
-                    detail: "session/load timed out waiting for RPC response or replay idle gap",
+                    detail: options.sessionLoadRequireRpcResponse
+                      ? "session/load timed out waiting for the RPC response"
+                      : "session/load timed out waiting for RPC response or replay idle gap",
                     cause: undefined,
                   }),
               ),
