@@ -66,7 +66,8 @@ export const makeMastraCodeAcpRuntime = (
           env: environment,
           extendEnv: false,
         },
-        authMethodId: "mastra-code-managed-auth",
+        // MC reads its own OAuth store; ACP authenticate is deliberately unsupported.
+        authMethodId: null,
         clientCapabilities: MASTRA_CODE_CLIENT_CAPABILITIES,
       }).pipe(
         Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner)),

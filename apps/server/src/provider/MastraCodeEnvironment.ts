@@ -60,9 +60,9 @@ export interface MastraCodeEnvironmentPaths {
  */
 export function buildMastraCodeEnvironment(
   paths: MastraCodeEnvironmentPaths,
-  instanceEnvironment?: ProviderInstanceEnvironment,
-  baseEnvironment: NodeJS.ProcessEnv = process.env,
-  platform: NodeJS.Platform = process.platform,
+  instanceEnvironment: ProviderInstanceEnvironment | undefined,
+  baseEnvironment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform,
 ): NodeJS.ProcessEnv {
   const inheritedEnvironment: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(baseEnvironment)) {
@@ -91,7 +91,7 @@ export function buildMastraCodeEnvironment(
     const pathDelimiter = platform === "win32" ? ";" : ":";
     const absolutePathEntries = pathValue
       .split(pathDelimiter)
-      .map((entry) => entry.trim().replace(/^\"+|\"+$/g, ""))
+      .map((entry) => entry.trim().replace(/^"+|"+$/g, ""))
       .filter((entry) => entry.length > 0 && isFullyQualifiedMastraCodePath(entry, platform));
     if (absolutePathEntries.length > 0) {
       environment.PATH = absolutePathEntries.join(pathDelimiter);

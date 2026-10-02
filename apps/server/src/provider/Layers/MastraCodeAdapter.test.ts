@@ -1,7 +1,3 @@
-import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
-
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
@@ -16,6 +12,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
@@ -160,7 +157,7 @@ const makeHarness = Effect.fn("makeMastraCodeAdapterTestHarness")(function* (
       instanceId: ProviderInstanceId.make("mastra-adapter-test"),
       appDataDirectory,
       environment: { PATH: process.env.PATH },
-      onAvailableCommands: options.onAvailableCommands,
+      ...(options.onAvailableCommands ? { onAvailableCommands: options.onAvailableCommands } : {}),
       makeRuntime: () =>
         Effect.gen(function* () {
           runtimeFactoryCount += 1;
@@ -293,15 +290,20 @@ it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
   it.effect("does not publish plan contents through a symlinked project plan root", () =>
     Effect.scoped(
       Effect.gen(function* () {
-        const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "mastra-plan-root-"));
-        const project = NodePath.join(root, "project");
-        const outside = NodePath.join(root, "outside");
-        NodeFS.mkdirSync(NodePath.join(project, ".mastracode"), { recursive: true });
-        NodeFS.mkdirSync(outside, { recursive: true });
-        NodeFS.writeFileSync(NodePath.join(outside, "plan.md"), "# secret external plan\n");
-        NodeFS.symlinkSync(outside, NodePath.join(project, ".mastracode", "plans"), "dir");
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "mastra-plan-root-" });
+        const project = path.join(root, "project");
+        const outside = path.join(root, "outside");
+        yield* fileSystem.makeDirectory(path.join(project, ".mastracode"), { recursive: true });
+        yield* fileSystem.makeDirectory(outside, { recursive: true });
+        yield* fileSystem.writeFileString(
+          path.join(outside, "plan.md"),
+          "# secret external plan\n",
+        );
+        yield* fileSystem.symlink(outside, path.join(project, ".mastracode", "plans"));
 
-        try {
+        {
           const harness = yield* makeHarness();
           const threadId = ThreadId.make("mastra-plan-symlink-root");
           yield* harness.adapter.startSession({
@@ -319,7 +321,7 @@ it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
               toolCallId: "external-plan",
               kind: "execute",
               title: "submit_plan",
-              rawInput: { path: NodePath.join(project, ".mastracode", "plans", "plan.md") },
+              rawInput: { path: path.join(project, ".mastracode", "plans", "plan.md") },
             },
             options: [
               { optionId: "allow", name: "Allow", kind: "allow_once" },
@@ -333,8 +335,6 @@ it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
 
           yield* harness.adapter.stopSession(threadId);
           expect((yield* Fiber.join(permission)).outcome.outcome).toBe("cancelled");
-        } finally {
-          NodeFS.rmSync(root, { recursive: true, force: true });
         }
       }),
     ),

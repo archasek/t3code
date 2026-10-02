@@ -26,15 +26,20 @@ const paths = {
 
 describe("buildMastraCodeEnvironment", () => {
   it("inherits only runtime essentials and isolates ambient Codex credentials and home paths", () => {
-    const environment = buildMastraCodeEnvironment(paths, undefined, {
-      PATH: "/usr/bin",
-      TMPDIR: "/tmp",
-      HOME: "/host/home",
-      CODEX_HOME: "/host/.codex",
-      OPENAI_API_KEY: "ambient-openai-secret",
-      HERMES_TOKEN: "ambient-hermes-secret",
-      CUSTOM_PARENT_SECRET: "ambient-custom-secret",
-    });
+    const environment = buildMastraCodeEnvironment(
+      paths,
+      undefined,
+      {
+        PATH: "/usr/bin",
+        TMPDIR: "/tmp",
+        HOME: "/host/home",
+        CODEX_HOME: "/host/.codex",
+        OPENAI_API_KEY: "ambient-openai-secret",
+        HERMES_TOKEN: "ambient-hermes-secret",
+        CUSTOM_PARENT_SECRET: "ambient-custom-secret",
+      },
+      "linux",
+    );
 
     expect(environment).toMatchObject({
       PATH: "/usr/bin",
@@ -65,6 +70,7 @@ describe("buildMastraCodeEnvironment", () => {
         { name: "MASTRA_VECTOR_DB_PATH", value: "/host/shared-vectors.db", sensitive: false },
       ],
       { PATH: "/usr/bin" },
+      "linux",
     );
 
     expect(environment.ANTHROPIC_API_KEY).toBe("explicit-provider-secret");
@@ -91,6 +97,7 @@ describe("buildMastraCodeEnvironment", () => {
         },
       ],
       { PATH: "/ignored/inherited/path" },
+      "linux",
     );
 
     expect(environment.PATH).toBe(trustedBinDirectory);

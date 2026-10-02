@@ -20,7 +20,6 @@ import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as ProviderAuthFlow from "./ProviderAuthFlow.ts";
 import type { ProviderAuthController } from "./Services/ProviderAuthService.ts";
 
-const PROVIDER = "mastraCode";
 const CODEX_PROVIDER = "openai-codex";
 const MAX_AUTH_OUTPUT_CHARS = 64 * 1024;
 const MAX_AUTH_OUTPUT_BYTES = 64 * 1024;
@@ -319,7 +318,7 @@ function runLogout(input: {
   readonly instanceId: ProviderInstanceId;
   readonly binaryPath: string;
   readonly environment: NodeJS.ProcessEnv;
-}): Effect.Effect<void, ProviderSetupError, ChildProcessSpawner.ChildProcessSpawner | Scope.Scope> {
+}): Effect.Effect<void, ProviderSetupError, ChildProcessSpawner.ChildProcessSpawner> {
   return Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const resolved = yield* resolveSpawnCommand(input.binaryPath || "mastracode", LOGOUT_ARGS, {
@@ -386,6 +385,7 @@ export const makeMastraCodeAuth = Effect.fn("makeMastraCodeAuth")(function* (inp
   never,
   Crypto.Crypto | ChildProcessSpawner.ChildProcessSpawner | Scope.Scope
 > {
+  const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const methods: ReadonlyArray<ProviderAuthMethod> = [
     {
       id: "openai-codex-device",
@@ -406,12 +406,12 @@ export const makeMastraCodeAuth = Effect.fn("makeMastraCodeAuth")(function* (inp
         binaryPath: input.binaryPath,
         environment: input.environment,
         context,
-      }),
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner)),
     logout: runLogout({
       instanceId: input.instanceId,
       binaryPath: input.binaryPath,
       environment: input.environment,
-    }),
+    }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner)),
   });
   return auth;
 });

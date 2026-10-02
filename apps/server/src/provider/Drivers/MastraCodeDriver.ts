@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makeMastraCodeTextGeneration } from "../../textGeneration/MastraCodeTextGeneration.ts";
@@ -60,6 +61,8 @@ export const MastraCodeDriver: ProviderDriver<MastraCodeSettings, MastraCodeDriv
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const crypto = yield* Crypto.Crypto;
+      const platform = yield* HostProcessPlatform;
+      const hostEnvironment = yield* HostProcessEnvironment;
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -83,7 +86,19 @@ export const MastraCodeDriver: ProviderDriver<MastraCodeSettings, MastraCodeDriv
       const appDataDirectory = yield* resolveMastraCodeAppDataDirectory(
         serverConfig.stateDir,
         instanceId,
-      ).pipe(Effect.provideService(Crypto.Crypto, crypto), Effect.provideService(Path.Path, path));
+      ).pipe(
+        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.provideService(Path.Path, path),
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER_KIND,
+              instanceId,
+              detail: "Mastra Code private storage identity could not be created.",
+              cause,
+            }),
+        ),
+      );
       const homeDirectory = path.join(appDataDirectory, "home");
       const privateDirectories = [
         appDataDirectory,
@@ -107,7 +122,7 @@ export const MastraCodeDriver: ProviderDriver<MastraCodeSettings, MastraCodeDriv
               }),
           ),
         );
-        if (process.platform !== "win32") {
+        if (platform !== "win32") {
           yield* fileSystem.chmod(directory, 0o700).pipe(
             Effect.mapError(
               () =>
@@ -137,6 +152,8 @@ export const MastraCodeDriver: ProviderDriver<MastraCodeSettings, MastraCodeDriv
           localAppDataDirectory: path.join(homeDirectory, "AppData", "Local"),
         },
         environment,
+        hostEnvironment,
+        platform,
       );
 
       const auth = yield* makeMastraCodeAuth({

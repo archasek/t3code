@@ -15,6 +15,7 @@ import {
 import { writeFakeCli } from "../../testUtils/fakeCli.ts";
 
 const decodeSettings = Schema.decodeSync(MastraCodeSettings);
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const runtimeInfo = {
   schemaVersion: 1,
   version: "0.42.3-alpha.4",
@@ -156,7 +157,7 @@ it.layer(NodeServices.layer)("checkMastraCodeProviderStatus", (it) => {
         name: "mastracode",
         source: [
           'if (process.argv[2] !== "info" || process.argv[3] !== "--json") process.exit(2);',
-          `process.stdout.write(${JSON.stringify(`${JSON.stringify(info)}\n`)});`,
+          `process.stdout.write(${encodeJson(`${encodeJson(info)}\n`)});`,
           `process.exitCode = ${exitCode};`,
         ].join("\n"),
       });

@@ -35,6 +35,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { ServerConfig } from "../../config.ts";
 import { withMastraCodeThreadStorage } from "../MastraCodeEnvironment.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
@@ -128,7 +129,7 @@ interface MastraCodeSessionContext {
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
   readonly turnLock: Semaphore.Semaphore;
   readonly promptDispatchLock: Semaphore.Semaphore;
-  notificationFiber: Fiber.Fiber<void, never> | undefined;
+  notificationFiber: Fiber.Fiber<void, ProviderAdapterRequestError> | undefined;
   session: ProviderSession;
   activeTurnId: TurnId | undefined;
   activePromptDispatched: Deferred.Deferred<void> | undefined;
@@ -200,13 +201,15 @@ function rawInputRecord(request: PermissionRequest): Record<string, unknown> | u
   return record(rawInput);
 }
 
-function isInside(path: Path.Path["Service"], root: string, candidate: string): boolean {
+function isInside(path: Path.Path, root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function isElicitationValue(value: unknown): boolean {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+type ElicitationValue = EffectAcpSchema.ElicitationContentValue;
+
+function isElicitationValue(value: unknown): value is ElicitationValue {
+  if (typeof value === "string" || typeof value === "boolean") return true;
   if (typeof value === "number") return Number.isFinite(value);
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
@@ -219,7 +222,7 @@ function elicitationQuestions(request: Extract<ElicitationRequest, { mode: "form
       property.type === "string"
         ? (property.enum ?? property.oneOf?.map((entry) => entry.const))
         : property.type === "array"
-          ? property.items.type === "string"
+          ? "enum" in property.items
             ? property.items.enum
             : property.items.anyOf.map((entry) => entry.const)
           : undefined;
@@ -276,7 +279,7 @@ function providerApprovalOptions(
   return options;
 }
 
-function resolvePlanPath(rawPath: string, cwd: string, path: Path.Path["Service"]): string {
+function resolvePlanPath(rawPath: string, cwd: string, path: Path.Path): string {
   return path.isAbsolute(rawPath) ? path.resolve(rawPath) : path.resolve(cwd, rawPath);
 }
 
@@ -285,6 +288,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
   options: MastraCodeAdapterOptions,
 ) {
   const crypto = yield* Crypto.Crypto;
+  const platform = yield* HostProcessPlatform;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig;
@@ -381,7 +385,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
       }
       if (!allowed) return undefined;
       const stat = yield* fileSystem.stat(actual).pipe(Effect.orElseSucceed(() => undefined));
-      if (!stat || stat.size > PLAN_MAX_BYTES || !stat.isFile()) return undefined;
+      if (!stat || stat.size > PLAN_MAX_BYTES || stat.type !== "File") return undefined;
       return yield* fileSystem.readFileString(actual).pipe(Effect.orElseSucceed(() => undefined));
     });
 
@@ -545,10 +549,18 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
           sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
         );
         let context: MastraCodeSessionContext | undefined;
-        const threadDigest = yield* crypto.digest(
-          "SHA-256",
-          new TextEncoder().encode(input.threadId),
-        );
+        const threadDigest = yield* crypto
+          .digest("SHA-256", new TextEncoder().encode(input.threadId))
+          .pipe(
+            Effect.mapError(
+              () =>
+                new ProviderAdapterProcessError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                  detail: "Mastra Code private thread storage identity could not be created.",
+                }),
+            ),
+          );
         const threadStorageDirectory = path.join(
           options.appDataDirectory,
           "threads",
@@ -568,7 +580,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
                 }),
             ),
           );
-          if (process.platform !== "win32") {
+          if (platform !== "win32") {
             yield* fileSystem.chmod(directory, 0o700).pipe(
               Effect.mapError(
                 () =>
@@ -627,7 +639,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
           );
         let activeAcpSessionId: string | undefined;
         const started = yield* Effect.gen(function* () {
-          yield* runtime.handleRequestPermission(
+          yield* runtime.handleRequestPermission((request) =>
             makePermissionHandler(
               input.threadId,
               input.runtimeMode,
@@ -635,6 +647,10 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
               pendingApprovals,
               () => context?.activeTurnId,
               () => activeAcpSessionId,
+            )(request).pipe(
+              Effect.mapError(() =>
+                EffectAcpErrors.AcpRequestError.internalError("Mastra Code approval failed."),
+              ),
             ),
           );
           yield* runtime.handleElicitation((request) =>
@@ -680,13 +696,14 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
                 if (resolution._tag === "cancelled") {
                   return { action: { action: "cancel" } } as const;
                 }
-                const content = Object.fromEntries(
-                  Object.entries(resolution.answers).filter(
-                    ([key, value]) =>
-                      Object.hasOwn(request.requestedSchema.properties ?? {}, key) &&
-                      isElicitationValue(value),
-                  ),
-                );
+                const content: Record<string, ElicitationValue> = {};
+                for (const [key, value] of Object.entries(resolution.answers)) {
+                  if (
+                    Object.hasOwn(request.requestedSchema.properties ?? {}, key) &&
+                    isElicitationValue(value)
+                  )
+                    content[key] = value;
+                }
                 yield* emit({
                   type: "user-input.resolved",
                   ...(yield* stamp),
@@ -701,7 +718,11 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
                 };
                 return response;
               }).pipe(Effect.ensuring(Effect.sync(() => pendingElicitations.delete(requestId))));
-            }),
+            }).pipe(
+              Effect.mapError(() =>
+                EffectAcpErrors.AcpRequestError.internalError("Mastra Code user input failed."),
+              ),
+            ),
           );
           return yield* runtime.start();
         }).pipe(
@@ -928,7 +949,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
           }
           yield* Deferred.succeed(claim.result, cancellation);
         }
-        return yield* Deferred.await(claim.result).pipe(Effect.flatMap(Effect.done));
+        return yield* Deferred.await(claim.result).pipe(Effect.flatMap((result) => result));
       }),
     );
 
@@ -1198,7 +1219,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
           yield* Effect.raceFirst(
             Fiber.join(promptFiber).pipe(Effect.as("prompt-completed" as const)),
             Deferred.await(cancelResult).pipe(
-              Effect.flatMap(Effect.done),
+              Effect.flatMap((result) => result),
               Effect.mapError((cause) =>
                 mapMastraCodeAcpError(input.threadId, "session/cancel", cause),
               ),

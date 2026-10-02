@@ -8,6 +8,7 @@ import {
   type ProjectScopedServerSettingKey,
   type ProjectSettingsOverrides,
   ProviderDriverKind,
+  ProviderInstanceId,
   type ServerProvider,
   ServerSettings,
   type ServerSettingsPatch,
@@ -89,7 +90,11 @@ export function isBackgroundTextGenerationSelectionEnabled(
 ): boolean {
   const mastraCode = ProviderDriverKind.make("mastraCode");
   const instance = settings.providerInstances[selection.instanceId];
-  if (selection.instanceId === mastraCode || instance?.driver === mastraCode) return false;
+  if (
+    selection.instanceId === ProviderInstanceId.make("mastraCode") ||
+    instance?.driver === mastraCode
+  )
+    return false;
   return isModelSelectionProviderEnabled(settings, selection);
 }
 

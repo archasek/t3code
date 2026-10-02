@@ -32,6 +32,35 @@ const mockRuntimeOptions = {
 } satisfies AcpSessionRuntime.AcpSessionRuntimeOptions;
 
 describe("AcpSessionRuntime", () => {
+  for (const authMethodId of [null, "test"] as const) {
+    it.effect(
+      `preserves startup authentication contract for ${authMethodId ?? "preconfigured auth"}`,
+      () =>
+        Effect.gen(function* () {
+          const startedRequests: Array<{ method: string; payload: unknown }> = [];
+          const runtime = yield* AcpSessionRuntime.make({
+            ...mockRuntimeOptions,
+            authMethodId,
+            requestLogger: (event) =>
+              Effect.sync(() => {
+                if (event.status === "started") {
+                  startedRequests.push({ method: event.method, payload: event.payload });
+                }
+              }),
+          });
+          yield* runtime.start();
+          expect(startedRequests.map((request) => request.method)).toEqual(
+            authMethodId === null
+              ? ["initialize", "session/new"]
+              : ["initialize", "authenticate", "session/new"],
+          );
+          if (authMethodId !== null) {
+            expect(startedRequests[1]?.payload).toEqual({ methodId: authMethodId });
+          }
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
   for (const setupMethod of ["session/new", "session/resume"] as const) {
     it.effect(`buffers root metadata while ${setupMethod} startup is still pending`, () =>
       Effect.gen(function* () {
