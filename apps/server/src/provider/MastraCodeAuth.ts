@@ -48,7 +48,7 @@ const SuccessEvent = Schema.Struct({
 });
 const ErrorEvent = Schema.Struct({
   type: Schema.Literal("error"),
-  code: Schema.Literals(["LOGIN_CANCELLED", "LOGIN_FAILED"]),
+  code: Schema.Literals(["LOGIN_CANCELLED", "LOGIN_FAILED", "AUTH_STORE_UNREADABLE"]),
 });
 const AuthJsonlEvent = Schema.Union([DeviceCodeEvent, ProgressEvent, SuccessEvent, ErrorEvent]);
 const decodeDeviceCodeEvent = Schema.decodeUnknownOption(DeviceCodeEvent);

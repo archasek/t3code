@@ -24,6 +24,7 @@ import {
   makeMastraCodeAdapter,
   mastraCodeAcpSessionMatches,
   mastraCodeSessionCanStartTurn,
+  coerceMastraCodeElicitationAnswer,
 } from "./MastraCodeAdapter.ts";
 
 type Runtime = Effect.Success<ReturnType<MastraCodeAdapterOptions["makeRuntime"]>>;
@@ -71,6 +72,8 @@ const makeHarness = Effect.fn("makeMastraCodeAdapterTestHarness")(function* (
   let promptCallCount = 0;
   let cancelCallCount = 0;
   let runtimeFactoryCount = 0;
+  let runtimeInput: Parameters<MastraCodeAdapterOptions["makeRuntime"]>[0] | undefined;
+  const promptInputs: Array<Parameters<Runtime["prompt"]>[0]> = [];
   let permissionHandler: Parameters<Runtime["handleRequestPermission"]>[0] | undefined;
   let elicitationHandler: Parameters<Runtime["handleElicitation"]>[0] | undefined;
 
@@ -113,8 +116,9 @@ const makeHarness = Effect.fn("makeMastraCodeAdapterTestHarness")(function* (
           : [],
       ),
     drainEvents: Effect.void,
-    prompt: (_input, promptOptions) =>
+    prompt: (input, promptOptions) =>
       Effect.gen(function* () {
+        promptInputs.push(input);
         promptCallCount += 1;
         if (promptOptions?.dispatched) {
           yield* Deferred.succeed(promptDispatchStarted, undefined);
@@ -158,8 +162,9 @@ const makeHarness = Effect.fn("makeMastraCodeAdapterTestHarness")(function* (
       appDataDirectory,
       environment: { PATH: process.env.PATH },
       ...(options.onAvailableCommands ? { onAvailableCommands: options.onAvailableCommands } : {}),
-      makeRuntime: () =>
+      makeRuntime: (input) =>
         Effect.gen(function* () {
+          runtimeInput = input;
           runtimeFactoryCount += 1;
           yield* Effect.addFinalizer(() => Deferred.succeed(runtimeScopeClosed, undefined));
           return runtime;
@@ -214,6 +219,8 @@ const makeHarness = Effect.fn("makeMastraCodeAdapterTestHarness")(function* (
     elicitationHandler: () => elicitationHandler,
     runtimeFactoryCount: () => runtimeFactoryCount,
     modeCalls: () => modeCalls,
+    runtimeInput: () => runtimeInput,
+    promptInputs,
   };
 });
 
@@ -222,6 +229,69 @@ const adapterTestLayer = ServerConfig.layerTest(process.cwd(), {
 }).pipe(Layer.provideMerge(NodeServices.layer));
 
 it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
+  it.effect("receives a plan from the private directory configured for this thread", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const harness = yield* makeHarness();
+        const threadId = ThreadId.make("private-plan");
+        yield* harness.adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        const plansDirectory = harness.runtimeInput()?.environment.MASTRA_PLANS_DIR;
+        expect(plansDirectory).toBeDefined();
+        if (!plansDirectory) return;
+        const planPath = path.join(plansDirectory, "plan.md");
+        yield* fileSystem.writeFileString(planPath, "# thread plan\n");
+        const permission = yield* harness.permissionHandler()!({
+          sessionId: "mastra-acp-session",
+          toolCall: {
+            toolCallId: "private-plan-call",
+            kind: "execute",
+            title: "submit_plan",
+            rawInput: { path: planPath },
+          },
+          options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+        }).pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(harness.permissionOpened);
+        expect(harness.events).toContainEqual(
+          expect.objectContaining({
+            type: "turn.proposed.completed",
+            payload: { planMarkdown: "# thread plan" },
+          }),
+        );
+        yield* harness.adapter.stopSession(threadId);
+        yield* Fiber.join(permission);
+      }),
+    ),
+  );
+
+  it.effect("sends slash commands without additional runtime instructions", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const threadId = ThreadId.make("slash-command");
+        yield* harness.adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        const turn = yield* harness.adapter
+          .sendTurn({ threadId, input: "/review changes" })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(harness.promptStarted);
+        expect(harness.promptInputs[0]?.prompt).toEqual([
+          { type: "text", text: "/review changes" },
+        ]);
+        yield* Deferred.succeed(harness.promptResponse, { stopReason: "end_turn" });
+        yield* Fiber.join(turn);
+        yield* harness.adapter.stopSession(threadId);
+      }),
+    ),
+  );
   it.effect("cancels permission requests from a different ACP session", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -891,6 +961,48 @@ it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
     ),
   );
 
+  it.effect("returns typed form answers and cancels a form with a missing required answer", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        for (const missingRequired of [false, true]) {
+          const harness = yield* makeHarness();
+          const threadId = ThreadId.make(`mastra-typed-form-${missingRequired}`);
+          yield* harness.adapter.startSession({
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "full-access",
+          });
+          const handler = harness.elicitationHandler()!;
+          const form = yield* handler({
+            mode: "form",
+            sessionId: "mastra-acp-session",
+            message: "Configure the run",
+            requestedSchema: {
+              type: "object",
+              properties: { approved: { type: "boolean" }, count: { type: "integer", minimum: 1 } },
+              required: ["approved", "count"],
+            },
+          }).pipe(Effect.forkChild({ startImmediately: true }));
+          yield* Deferred.await(harness.elicitationRequested);
+          const requested = harness.events
+            .filter((event) => event.type === "user-input.requested")
+            .at(-1)!;
+          yield* harness.adapter.respondToUserInput(
+            threadId,
+            ApprovalRequestId.make(String(requested.requestId)),
+            missingRequired ? { approved: "false" } : { approved: "false", count: "2" },
+          );
+          expect(yield* Fiber.join(form)).toEqual(
+            missingRequired
+              ? { action: { action: "cancel" } }
+              : { action: { action: "accept", content: { approved: false, count: 2 } } },
+          );
+          yield* harness.adapter.stopSession(threadId);
+        }
+      }),
+    ),
+  );
+
   it.effect("answers a cancelled ACP elicitation with the protocol cancel action", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -984,6 +1096,22 @@ it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
 });
 
 describe("Mastra Code ACP boundaries", () => {
+  it("coerces form strings to declared booleans and numbers without truthiness", () => {
+    expect(coerceMastraCodeElicitationAnswer({ type: "boolean" }, "false")).toBe(false);
+    expect(coerceMastraCodeElicitationAnswer({ type: "boolean" }, "true")).toBe(true);
+    expect(
+      coerceMastraCodeElicitationAnswer({ type: "integer", minimum: 1, maximum: 3 }, "2"),
+    ).toBe(2);
+    expect(coerceMastraCodeElicitationAnswer({ type: "number" }, "1.5")).toBe(1.5);
+    expect(coerceMastraCodeElicitationAnswer({ type: "boolean" }, "yes")).toBeUndefined();
+    expect(coerceMastraCodeElicitationAnswer({ type: "number" }, "")).toBeUndefined();
+    expect(coerceMastraCodeElicitationAnswer({ type: "number" }, "Infinity")).toBeUndefined();
+    expect(coerceMastraCodeElicitationAnswer({ type: "integer" }, "1.5")).toBeUndefined();
+    expect(coerceMastraCodeElicitationAnswer({ type: "number", maximum: 3 }, "4")).toBeUndefined();
+    expect(
+      coerceMastraCodeElicitationAnswer({ type: "string", enum: ["blue"] }, "red"),
+    ).toBeUndefined();
+  });
   it("accepts ACP requests only from the active ACP session", () => {
     expect(mastraCodeAcpSessionMatches("session-a", "session-a")).toBe(true);
     expect(mastraCodeAcpSessionMatches("session-a", "session-b")).toBe(false);

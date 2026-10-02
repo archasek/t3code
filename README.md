@@ -22,6 +22,10 @@ We wanted something performant, remote-ready, and truly open. If we ever go the 
 > - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
 > - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
 
+This fork also supports [Mastra Code](./docs/user/providers-mastracode.md).
+Use its compatible fork runtime on the server; the upstream installers above
+do not include this integration.
+
 ### Command line
 
 ```bash

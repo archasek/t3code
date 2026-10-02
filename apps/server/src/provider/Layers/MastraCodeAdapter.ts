@@ -208,10 +208,44 @@ function isInside(path: Path.Path, root: string, candidate: string): boolean {
 
 type ElicitationValue = EffectAcpSchema.ElicitationContentValue;
 
-function isElicitationValue(value: unknown): value is ElicitationValue {
-  if (typeof value === "string" || typeof value === "boolean") return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  return Array.isArray(value) && value.every((item) => typeof item === "string");
+export function coerceMastraCodeElicitationAnswer(
+  property: EffectAcpSchema.ElicitationPropertySchema,
+  answer: unknown,
+): ElicitationValue | undefined {
+  switch (property.type) {
+    case "boolean":
+      if (typeof answer === "boolean") return answer;
+      if (typeof answer === "string" && /^(true|false)$/i.test(answer.trim()))
+        return answer.trim().toLowerCase() === "true";
+      return undefined;
+    case "number":
+    case "integer": {
+      const value = typeof answer === "string" && answer.trim() !== "" ? Number(answer) : answer;
+      if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+      if (property.type === "integer" && !Number.isInteger(value)) return undefined;
+      if (property.minimum != null && value < property.minimum) return undefined;
+      if (property.maximum != null && value > property.maximum) return undefined;
+      return value;
+    }
+    case "string": {
+      if (typeof answer !== "string") return undefined;
+      if (property.minLength != null && answer.length < property.minLength) return undefined;
+      if (property.maxLength != null && answer.length > property.maxLength) return undefined;
+      const allowed = property.enum ?? property.oneOf?.map((entry) => entry.const);
+      return allowed && !allowed.includes(answer) ? undefined : answer;
+    }
+    case "array": {
+      if (!Array.isArray(answer) || !answer.every((item) => typeof item === "string"))
+        return undefined;
+      if (property.minItems != null && answer.length < property.minItems) return undefined;
+      if (property.maxItems != null && answer.length > property.maxItems) return undefined;
+      const allowed =
+        "enum" in property.items
+          ? property.items.enum
+          : property.items.anyOf.map((entry) => entry.const);
+      return answer.every((item) => allowed.includes(item)) ? answer : undefined;
+    }
+  }
 }
 
 function elicitationQuestions(request: Extract<ElicitationRequest, { mode: "form" }>) {
@@ -352,7 +386,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
       });
     });
 
-  const readPlan = (request: PermissionRequest, cwd: string) =>
+  const readPlan = (request: PermissionRequest, cwd: string, plansDirectory: string) =>
     Effect.gen(function* () {
       const rawPath = text(rawInputRecord(request)?.path);
       if (!rawPath) return undefined;
@@ -364,18 +398,30 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
         .pipe(Effect.orElseSucceed(() => undefined));
       if (!actual || !actual.toLowerCase().endsWith(".md")) return undefined;
       const allowedRoots = [
-        path.join(cwd, ".mastracode", "plans"),
-        path.join(cwd, ".artifacts", "plans"),
+        { root: path.join(cwd, ".mastracode", "plans"), trustRoot: realCwd },
+        { root: path.join(cwd, ".artifacts", "plans"), trustRoot: realCwd },
+        {
+          root: plansDirectory,
+          trustRoot: yield* fileSystem
+            .realPath(options.appDataDirectory)
+            .pipe(Effect.orElseSucceed(() => undefined)),
+        },
       ];
       let allowed = false;
       for (const allowedRoot of allowedRoots) {
         const realRoot = yield* fileSystem
-          .realPath(allowedRoot)
+          .realPath(allowedRoot.root)
           .pipe(Effect.orElseSucceed(() => undefined));
         // A project-controlled symlink at `.mastracode/plans` or
         // `.artifacts/plans` must not redefine the trust root to an external
         // directory. Check the resolved root itself before checking the file.
-        if (!realRoot || realRoot === realCwd || !isInside(path, realCwd, realRoot)) continue;
+        if (
+          !realRoot ||
+          !allowedRoot.trustRoot ||
+          realRoot === allowedRoot.trustRoot ||
+          !isInside(path, allowedRoot.trustRoot, realRoot)
+        )
+          continue;
         if (!isInside(path, realRoot, actual)) continue;
         const relative = path.relative(realRoot, actual);
         if (relative !== "" && path.basename(relative) === relative) {
@@ -405,6 +451,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
       threadId: ThreadId,
       runtimeMode: RuntimeMode,
       cwd: string,
+      plansDirectory: string,
       pending: Map<ApprovalRequestId, PendingApproval>,
       getTurnId: () => TurnId | undefined,
       getActiveSessionId: () => string | undefined,
@@ -425,7 +472,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
         const toolName = text(request.toolCall.title);
         const isPlanRequest = toolName !== undefined && PLAN_TOOL_NAMES.has(toolName);
         if (isPlanRequest) {
-          const plan = yield* readPlan(request, cwd);
+          const plan = yield* readPlan(request, cwd, plansDirectory);
           if (plan?.trim()) {
             yield* emit({
               type: "turn.proposed.completed",
@@ -569,6 +616,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
         for (const directory of [
           path.join(options.appDataDirectory, "threads"),
           threadStorageDirectory,
+          path.join(threadStorageDirectory, "plans"),
         ]) {
           yield* fileSystem.makeDirectory(directory, { recursive: true, mode: 0o700 }).pipe(
             Effect.mapError(
@@ -601,7 +649,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
             databasePath: path.join(threadStorageDirectory, "mastra.db"),
             vectorDatabasePath: path.join(threadStorageDirectory, "mastra-vectors.db"),
             observabilityDatabasePath: path.join(threadStorageDirectory, "observability.duckdb"),
-            plansDirectory: path.join(options.appDataDirectory, "plans"),
+            plansDirectory: path.join(threadStorageDirectory, "plans"),
           },
         );
         const runtime = yield* options
@@ -644,6 +692,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
               input.threadId,
               input.runtimeMode,
               cwd,
+              path.join(threadStorageDirectory, "plans"),
               pendingApprovals,
               () => context?.activeTurnId,
               () => activeAcpSessionId,
@@ -698,12 +747,14 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
                 }
                 const content: Record<string, ElicitationValue> = {};
                 for (const [key, value] of Object.entries(resolution.answers)) {
-                  if (
-                    Object.hasOwn(request.requestedSchema.properties ?? {}, key) &&
-                    isElicitationValue(value)
-                  )
-                    content[key] = value;
+                  const properties = request.requestedSchema.properties ?? {};
+                  if (!Object.hasOwn(properties, key)) continue;
+                  const coerced = coerceMastraCodeElicitationAnswer(properties[key]!, value);
+                  if (coerced === undefined) return { action: { action: "cancel" } } as const;
+                  content[key] = coerced;
                 }
+                if (request.requestedSchema.required?.some((key) => !Object.hasOwn(content, key)))
+                  return { action: { action: "cancel" } } as const;
                 yield* emit({
                   type: "user-input.resolved",
                   ...(yield* stamp),
@@ -1150,14 +1201,19 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
           }
 
           const promptDispatched = yield* Deferred.make<void>();
+          const isSlashCommand = prompt.some(
+            (part) => part.type === "text" && /^\/[^\s/]+(?:\s|$)/.test(part.text),
+          );
           const promptPayload = {
-            prompt: [
-              ...prompt,
-              {
-                type: "text" as const,
-                text: buildRuntimeInstructions({ harness: "Mastra Code", model }),
-              },
-            ],
+            prompt: isSlashCommand
+              ? prompt
+              : [
+                  ...prompt,
+                  {
+                    type: "text" as const,
+                    text: buildRuntimeInstructions({ harness: "Mastra Code", model }),
+                  },
+                ],
           };
           const dispatch = yield* context.promptDispatchLock.withPermit(
             Effect.gen(function* () {

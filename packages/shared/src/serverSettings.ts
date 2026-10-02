@@ -91,7 +91,7 @@ export function isBackgroundTextGenerationSelectionEnabled(
   const mastraCode = ProviderDriverKind.make("mastraCode");
   const instance = settings.providerInstances[selection.instanceId];
   if (
-    selection.instanceId === ProviderInstanceId.make("mastraCode") ||
+    (instance === undefined && selection.instanceId === ProviderInstanceId.make("mastraCode")) ||
     instance?.driver === mastraCode
   )
     return false;

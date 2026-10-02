@@ -460,6 +460,19 @@ describe("serverSettings helpers", () => {
     );
   });
 
+  it("honors a non-Mastra explicit driver in the legacy mastraCode slot", () => {
+    const instanceId = ProviderInstanceId.make("mastraCode");
+    const selection = createModelSelection(instanceId, "gpt-5");
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        ...DEFAULT_SERVER_SETTINGS.providerInstances,
+        [instanceId]: { driver: ProviderDriverKind.make("codex"), enabled: true, config: {} },
+      },
+    };
+    expect(isBackgroundTextGenerationSelectionEnabled(settings, selection)).toBe(true);
+  });
+
   it("falls back from an unavailable source control writer provider", () => {
     const instanceId = ProviderInstanceId.make("missing_writer");
     const sourceControlWriterModelSelection = createModelSelection(instanceId, "missing-model");

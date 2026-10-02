@@ -43,6 +43,11 @@ describe("parseMastraCodeDeviceCodeEvent", () => {
 });
 
 describe("parseMastraCodeAuthJsonlLine", () => {
+  it("preserves the unreadable auth-store diagnostic", () => {
+    expect(parseMastraCodeAuthJsonlLine('{"type":"error","code":"AUTH_STORE_UNREADABLE"}')).toEqual(
+      { type: "event", event: { type: "error", code: "AUTH_STORE_UNREADABLE" } },
+    );
+  });
   it("accepts one object event per JSONL line and skips blank lines", () => {
     expect(parseMastraCodeAuthJsonlLine("  \n")).toEqual({ type: "empty" });
     expect(
