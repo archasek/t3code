@@ -119,6 +119,8 @@ interface PendingElicitation {
     | { readonly _tag: "cancelled" }
   >;
   readonly turnId: TurnId | undefined;
+  readonly settled: Deferred.Deferred<void>;
+  cancelled: boolean;
 }
 
 interface MastraCodeSessionContext {
@@ -210,14 +212,24 @@ function isInside(path: Path.Path, root: string, candidate: string): boolean {
 
 type ElicitationValue = EffectAcpSchema.ElicitationContentValue;
 
-function elicitationEnumValues(property: EffectAcpSchema.ElicitationPropertySchema) {
+function elicitationEnumOptions(property: EffectAcpSchema.ElicitationPropertySchema) {
   if (property.type === "string")
-    return property.enum ?? property.oneOf?.map((entry) => entry.const);
+    return (
+      property.enum?.map((value) => ({ value, label: value })) ??
+      property.oneOf?.map((entry) => ({ value: entry.const, label: entry.title ?? entry.const }))
+    );
   if (property.type === "array")
     return "enum" in property.items
-      ? property.items.enum
-      : property.items.anyOf.map((entry) => entry.const);
+      ? property.items.enum.map((value) => ({ value, label: value }))
+      : property.items.anyOf.map((entry) => ({
+          value: entry.const,
+          label: entry.title ?? entry.const,
+        }));
   return undefined;
+}
+
+function elicitationEnumValues(property: EffectAcpSchema.ElicitationPropertySchema) {
+  return elicitationEnumOptions(property)?.map((option) => option.value);
 }
 
 function optionalElicitationSkipValue(
@@ -299,10 +311,10 @@ function elicitationQuestions(
     ];
   }
   return Object.entries(properties).map(([id, property]) => {
-    const enumValues = elicitationEnumValues(property);
+    const enumOptions = elicitationEnumOptions(property);
     const options =
-      enumValues?.map((value) => ({
-        label: value,
+      enumOptions?.map(({ value, label }) => ({
+        label,
         description: property.description ?? "",
         value,
       })) ?? [];
@@ -317,7 +329,7 @@ function elicitationQuestions(
       header: text(property.title) ?? (required.has(id) ? "Required" : "Optional"),
       question: [request.message, text(property.description)].filter(Boolean).join("\n\n") || id,
       options,
-      allowCustomAnswer: !enumValues?.length,
+      allowCustomAnswer: !enumOptions?.length,
       multiSelect: property.type === "array",
     };
   });
@@ -757,38 +769,88 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
                 !context ||
                 context.stopped ||
                 context.disconnected ||
+                (context.activeTurnId !== undefined &&
+                  context.cancelRequestedTurnId === context.activeTurnId) ||
                 sessions.get(input.threadId) !== context ||
                 !mastraCodeAcpSessionMatches(request.sessionId, activeAcpSessionId)
               ) {
                 return { action: { action: "cancel" } } as const;
               }
-              const turnId = context.activeTurnId;
+              const elicitationContext = context;
+              const turnId = elicitationContext.activeTurnId;
               const requestId = ApprovalRequestId.make(yield* newEventId);
               const runtimeRequestId = RuntimeRequestId.make(requestId);
+              const requestedStamp = yield* stamp;
+              const resolvedEventId = EventId.make(yield* newEventId);
               const result = yield* Deferred.make<
                 | { readonly _tag: "answers"; readonly answers: ProviderUserInputAnswers }
                 | { readonly _tag: "cancelled" }
               >();
-              pendingElicitations.set(requestId, { request, result, turnId });
-              return yield* Effect.gen(function* () {
+              const settled = yield* Deferred.make<void>();
+              const pending: PendingElicitation = {
+                request,
+                result,
+                turnId,
+                settled,
+                cancelled: false,
+              };
+              let requested = false;
+              let resolved = false;
+              let resolvedAnswers: Record<string, ElicitationValue> = {};
+              const closeForm = Effect.gen(function* () {
+                if (!requested || resolved) return;
                 yield* emit({
-                  type: "user-input.requested",
-                  ...(yield* stamp),
+                  type: "user-input.resolved",
+                  eventId: resolvedEventId,
+                  createdAt: yield* nowIso,
                   provider: PROVIDER,
                   threadId: input.threadId,
                   turnId,
                   requestId: runtimeRequestId,
-                  payload: { questions: elicitationQuestions(request, requestId) },
-                  raw: {
-                    source: "acp.jsonrpc",
-                    method: "session/elicitation",
-                    payload: {
-                      message: request.message,
-                      mode: request.mode,
-                      propertyCount: Object.keys(request.requestedSchema.properties ?? {}).length,
-                    },
-                  },
+                  payload: { answers: resolvedAnswers },
                 });
+                resolved = true;
+              });
+              return yield* Effect.gen(function* () {
+                const announced = yield* elicitationContext.promptDispatchLock
+                  .withPermit(
+                    Effect.gen(function* () {
+                      if (
+                        pending.cancelled ||
+                        elicitationContext.stopped ||
+                        elicitationContext.disconnected ||
+                        sessions.get(input.threadId) !== elicitationContext ||
+                        elicitationContext.activeTurnId !== turnId ||
+                        (turnId !== undefined &&
+                          elicitationContext.cancelRequestedTurnId === turnId)
+                      )
+                        return false;
+                      pendingElicitations.set(requestId, pending);
+                      yield* emit({
+                        type: "user-input.requested",
+                        ...requestedStamp,
+                        provider: PROVIDER,
+                        threadId: input.threadId,
+                        turnId,
+                        requestId: runtimeRequestId,
+                        payload: { questions: elicitationQuestions(request, requestId) },
+                        raw: {
+                          source: "acp.jsonrpc",
+                          method: "session/elicitation",
+                          payload: {
+                            message: request.message,
+                            mode: request.mode,
+                            propertyCount: Object.keys(request.requestedSchema.properties ?? {})
+                              .length,
+                          },
+                        },
+                      });
+                      requested = true;
+                      return true;
+                    }),
+                  )
+                  .pipe(Effect.uninterruptible);
+                if (!announced) return { action: { action: "cancel" } } as const;
                 const resolution = yield* Deferred.await(result);
                 if (resolution._tag === "cancelled") {
                   return { action: { action: "cancel" } } as const;
@@ -829,20 +891,36 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
                 }
                 if (request.requestedSchema.required?.some((key) => !Object.hasOwn(content, key)))
                   return { action: { action: "cancel" } } as const;
-                yield* emit({
-                  type: "user-input.resolved",
-                  ...(yield* stamp),
-                  provider: PROVIDER,
-                  threadId: input.threadId,
-                  turnId,
-                  requestId: runtimeRequestId,
-                  payload: { answers: content },
-                });
-                const response: ElicitationResponse = {
-                  action: { action: "accept", content },
-                };
-                return response;
-              }).pipe(Effect.ensuring(Effect.sync(() => pendingElicitations.delete(requestId))));
+                return yield* elicitationContext.promptDispatchLock
+                  .withPermit(
+                    Effect.gen(function* () {
+                      if (
+                        pending.cancelled ||
+                        elicitationContext.stopped ||
+                        elicitationContext.disconnected ||
+                        elicitationContext.activeTurnId !== turnId ||
+                        (turnId !== undefined &&
+                          elicitationContext.cancelRequestedTurnId === turnId)
+                      )
+                        return { action: { action: "cancel" } } as const;
+                      resolvedAnswers = content;
+                      yield* closeForm;
+                      const response: ElicitationResponse = {
+                        action: { action: "accept", content },
+                      };
+                      return response;
+                    }),
+                  )
+                  .pipe(Effect.uninterruptible);
+              }).pipe(
+                Effect.ensuring(
+                  Effect.gen(function* () {
+                    yield* closeForm;
+                    pendingElicitations.delete(requestId);
+                    yield* Deferred.succeed(settled, undefined);
+                  }),
+                ),
+              );
             }).pipe(
               Effect.mapError(() =>
                 EffectAcpErrors.AcpRequestError.internalError("Mastra Code user input failed."),
@@ -1078,6 +1156,29 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
       }),
     );
 
+  const cancelElicitations = (context: MastraCodeSessionContext, turnId?: TurnId) =>
+    Effect.gen(function* () {
+      if (
+        !Array.from(context.elicitations.values()).some(
+          (pending) => turnId === undefined || pending.turnId === turnId,
+        )
+      )
+        return;
+      const pendingForms = yield* context.promptDispatchLock.withPermit(
+        Effect.sync(() => {
+          const forms = Array.from(context.elicitations.values()).filter(
+            (pending) => turnId === undefined || pending.turnId === turnId,
+          );
+          for (const pending of forms) pending.cancelled = true;
+          return forms;
+        }),
+      );
+      for (const pending of pendingForms) {
+        yield* Deferred.succeed(pending.result, { _tag: "cancelled" });
+      }
+      for (const pending of pendingForms) yield* Deferred.await(pending.settled);
+    });
+
   function stopSessionInternal(context: MastraCodeSessionContext) {
     return Effect.gen(function* () {
       const startedCleanup = yield* context.promptDispatchLock.withPermit(
@@ -1092,9 +1193,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
       for (const pending of context.approvals.values()) {
         yield* Deferred.succeed(pending.decision, "cancel").pipe(Effect.ignore);
       }
-      for (const pending of context.elicitations.values()) {
-        yield* Deferred.succeed(pending.result, { _tag: "cancelled" }).pipe(Effect.ignore);
-      }
+      yield* cancelElicitations(context);
       const activePromptDispatched = context.activePromptDispatched;
       const activeTurnId = context.activeTurnId;
       if (activePromptDispatched && activeTurnId !== undefined) {
@@ -1127,6 +1226,8 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
         Effect.uninterruptible(
           Effect.gen(function* () {
             if (!lifecycle.started || lifecycle.terminalEmitted) return;
+            context.cancelRequestedTurnId = lifecycle.turnId;
+            yield* cancelElicitations(context, lifecycle.turnId);
             yield* emit({
               type: "turn.completed",
               ...(yield* stamp),
@@ -1438,11 +1539,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
           yield* Deferred.succeed(pending.decision, "cancel").pipe(Effect.ignore);
         }
       }
-      for (const pending of context.elicitations.values()) {
-        if (pending.turnId === activeTurnId) {
-          yield* Deferred.succeed(pending.result, { _tag: "cancelled" }).pipe(Effect.ignore);
-        }
-      }
+      yield* cancelElicitations(context, activeTurnId);
       if (!cancellationRequested) return;
       const activePromptDispatched = context.activePromptDispatched;
       if (activePromptDispatched) {

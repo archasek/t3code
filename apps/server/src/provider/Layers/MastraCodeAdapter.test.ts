@@ -7,12 +7,15 @@ import {
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import * as Stream from "effect/Stream";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
@@ -65,6 +68,7 @@ const makeHarness = Effect.fn("makeMastraCodeAdapterTestHarness")(function* (
   const releasePromptDispatch = yield* Deferred.make<void>();
   const permissionOpened = yield* Deferred.make<void>();
   const elicitationRequested = yield* Deferred.make<void>();
+  const elicitationResolved = yield* Deferred.make<void>();
   const secondTurnStarted = yield* Deferred.make<void>();
   const sessionExited = yield* Deferred.make<void>();
   const runtimeScopeClosed = yield* Deferred.make<void>();
@@ -199,6 +203,9 @@ const makeHarness = Effect.fn("makeMastraCodeAdapterTestHarness")(function* (
         if (event.type === "user-input.requested") {
           yield* Deferred.succeed(elicitationRequested, undefined);
         }
+        if (event.type === "user-input.resolved") {
+          yield* Deferred.succeed(elicitationResolved, undefined);
+        }
         if (event.type === "session.exited") {
           yield* Deferred.succeed(sessionExited, undefined);
         }
@@ -223,6 +230,7 @@ const makeHarness = Effect.fn("makeMastraCodeAdapterTestHarness")(function* (
     secondTurnStarted,
     permissionOpened,
     elicitationRequested,
+    elicitationResolved,
     sessionExited,
     runtimeScopeClosed,
     connectionTerminated,
@@ -690,6 +698,17 @@ it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
           .pipe(Effect.forkChild({ startImmediately: true }));
         yield* Deferred.await(harness.cancelCalled);
 
+        expect(
+          yield* harness.elicitationHandler()!({
+            mode: "form",
+            sessionId: "mastra-acp-session",
+            message: "Too late",
+            requestedSchema: { type: "object", properties: { answer: { type: "string" } } },
+          }),
+        ).toEqual({ action: { action: "cancel" } });
+        expect(
+          harness.events.filter((event) => event.type === "user-input.requested"),
+        ).toHaveLength(0);
         yield* Deferred.succeed(harness.promptResponse, { stopReason: "end_turn" });
         const firstResult = yield* Fiber.join(firstTurn).pipe(Effect.exit);
         yield* Deferred.await(harness.secondTurnStarted);
@@ -993,6 +1012,308 @@ it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
     ),
   );
 
+  it.effect("does not register a form after its captured turn completes during ID allocation", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const crypto = yield* Crypto.Crypto;
+        const allocationStarted = yield* Deferred.make<void>();
+        const releaseAllocation = yield* Deferred.make<void>();
+        let hold = false;
+        const heldCrypto = Crypto.Crypto.of({
+          ...crypto,
+          randomUUIDv4: Effect.suspend(() =>
+            hold
+              ? Effect.gen(function* () {
+                  yield* Deferred.succeed(allocationStarted, undefined);
+                  yield* Deferred.await(releaseAllocation);
+                  return yield* crypto.randomUUIDv4;
+                })
+              : crypto.randomUUIDv4,
+          ),
+        });
+        const harness = yield* makeHarness().pipe(Effect.provideService(Crypto.Crypto, heldCrypto));
+        const threadId = ThreadId.make("mastra-form-late-registration");
+        yield* harness.adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        const turn = yield* harness.adapter
+          .sendTurn({ threadId, input: "complete while allocating" })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(harness.promptStarted);
+        hold = true;
+        const form = yield* harness.elicitationHandler()!({
+          mode: "form",
+          sessionId: "mastra-acp-session",
+          message: "Too late",
+          requestedSchema: { type: "object", properties: { answer: { type: "string" } } },
+        }).pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(allocationStarted);
+        hold = false;
+        yield* Deferred.succeed(harness.promptResponse, { stopReason: "end_turn" });
+        yield* Fiber.join(turn);
+        yield* Deferred.succeed(releaseAllocation, undefined);
+        expect(yield* Fiber.join(form)).toEqual({ action: { action: "cancel" } });
+        expect(
+          harness.events.filter(
+            (event) =>
+              event.type === "user-input.requested" || event.type === "user-input.resolved",
+          ),
+        ).toEqual([]);
+        yield* harness.adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("reserves terminal IDs before requesting input and survives later crypto failure", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const crypto = yield* Crypto.Crypto;
+        let fail = false;
+        const failingCrypto = Crypto.Crypto.of({
+          ...crypto,
+          randomUUIDv4: Effect.suspend(() =>
+            fail
+              ? Effect.fail(
+                  PlatformError.systemError({
+                    module: "Crypto",
+                    method: "randomUUIDv4",
+                    _tag: "Unknown",
+                  }),
+                )
+              : crypto.randomUUIDv4,
+          ),
+        });
+        const harness = yield* makeHarness().pipe(
+          Effect.provideService(Crypto.Crypto, failingCrypto),
+        );
+        const threadId = ThreadId.make("mastra-form-crypto-failure");
+        yield* harness.adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        const request = {
+          mode: "form" as const,
+          sessionId: "mastra-acp-session",
+          message: "Answer",
+          requestedSchema: {
+            type: "object" as const,
+            properties: { answer: { type: "string" as const } },
+            required: ["answer"],
+          },
+        };
+        fail = true;
+        expect(
+          Exit.isFailure(yield* harness.elicitationHandler()!(request).pipe(Effect.exit)),
+        ).toBe(true);
+        expect(
+          harness.events.filter((event) => event.type === "user-input.requested"),
+        ).toHaveLength(0);
+        fail = false;
+        const form = yield* harness.elicitationHandler()!(request).pipe(
+          Effect.forkChild({ startImmediately: true }),
+        );
+        yield* Deferred.await(harness.elicitationRequested);
+        const requested = harness.events.filter(
+          (event) => event.type === "user-input.requested",
+        )[0]!;
+        fail = true;
+        yield* harness.adapter.respondToUserInput(
+          threadId,
+          ApprovalRequestId.make(String(requested.requestId)),
+          { answer: "done" },
+        );
+        expect(yield* Fiber.join(form)).toEqual({
+          action: { action: "accept", content: { answer: "done" } },
+        });
+        yield* Deferred.await(harness.elicitationResolved);
+        expect(harness.events.filter((event) => event.type === "user-input.resolved")).toHaveLength(
+          1,
+        );
+        expect(
+          Exit.isFailure(
+            yield* harness.adapter
+              .respondToUserInput(threadId, ApprovalRequestId.make(String(requested.requestId)), {
+                answer: "late",
+              })
+              .pipe(Effect.exit),
+          ),
+        ).toBe(true);
+        fail = false;
+        yield* harness.adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("cancels answered forms during validation before completing the turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const validationStarted = yield* Deferred.make<void>();
+        const releaseValidation = yield* Deferred.make<void>();
+        const heldSpawner = ChildProcessSpawner.make((command) =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(validationStarted, undefined);
+            yield* Deferred.await(releaseValidation);
+            return yield* spawner.spawn(command);
+          }),
+        );
+        const harness = yield* makeHarness().pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, heldSpawner),
+        );
+        const threadId = ThreadId.make("mastra-interrupt-validating-form");
+        yield* harness.adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        const turn = yield* harness.adapter
+          .sendTurn({ threadId, input: "ask" })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(harness.promptStarted);
+        const form = yield* harness.elicitationHandler()!({
+          mode: "form",
+          sessionId: "mastra-acp-session",
+          message: "Answer",
+          requestedSchema: {
+            type: "object",
+            properties: { answer: { type: "string", pattern: "^ok$" } },
+            required: ["answer"],
+          },
+        }).pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(harness.elicitationRequested);
+        const requested = harness.events.filter(
+          (event) => event.type === "user-input.requested",
+        )[0]!;
+        yield* harness.adapter.respondToUserInput(
+          threadId,
+          ApprovalRequestId.make(String(requested.requestId)),
+          { answer: "ok" },
+        );
+        yield* Deferred.await(validationStarted);
+        const interrupt = yield* harness.adapter
+          .interruptTurn(threadId)
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Effect.yieldNow;
+        expect(harness.cancelCallCount()).toBe(0);
+        yield* Deferred.succeed(releaseValidation, undefined);
+        expect(yield* Fiber.join(form)).toEqual({ action: { action: "cancel" } });
+        yield* Fiber.join(interrupt);
+        yield* Fiber.join(turn);
+        yield* Deferred.await(harness.elicitationResolved);
+        const resolved = harness.events.filter((event) => event.type === "user-input.resolved");
+        expect(resolved).toHaveLength(1);
+        expect(resolved[0]!.payload.answers).toEqual({});
+        expect(
+          harness.events.findIndex((event) => event.type === "user-input.resolved"),
+        ).toBeLessThan(harness.events.findIndex((event) => event.type === "turn.completed"));
+        yield* harness.adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("preserves enum machine values and human titles", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const threadId = ThreadId.make("mastra-option-titles");
+        yield* harness.adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        const form = yield* harness.elicitationHandler()!({
+          mode: "form",
+          sessionId: "mastra-acp-session",
+          message: "Choose",
+          requestedSchema: {
+            type: "object",
+            required: ["single", "multi", "plain"],
+            properties: {
+              single: {
+                type: "string",
+                oneOf: [
+                  { const: "prod", title: "Production" },
+                  { const: "dev", title: "Development" },
+                ],
+              },
+              multi: { type: "array", items: { anyOf: [{ const: "read", title: "Read only" }] } },
+              plain: { type: "string", enum: ["raw"] },
+            },
+          },
+        }).pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(harness.elicitationRequested);
+        const requested = harness.events.filter(
+          (event) => event.type === "user-input.requested",
+        )[0]!;
+        expect(requested.payload.questions.map((question) => question.options)).toEqual([
+          [
+            { value: "prod", label: "Production", description: "" },
+            { value: "dev", label: "Development", description: "" },
+          ],
+          [{ value: "read", label: "Read only", description: "" }],
+          [{ value: "raw", label: "raw", description: "" }],
+        ]);
+        yield* harness.adapter.respondToUserInput(
+          threadId,
+          ApprovalRequestId.make(String(requested.requestId)),
+          {
+            single: "prod",
+            multi: ["read"],
+            plain: "raw",
+          },
+        );
+        expect(yield* Fiber.join(form)).toEqual({
+          action: { action: "accept", content: { single: "prod", multi: ["read"], plain: "raw" } },
+        });
+        yield* Deferred.await(harness.elicitationResolved);
+        expect(harness.events.filter((event) => event.type === "user-input.resolved")).toHaveLength(
+          1,
+        );
+        yield* harness.adapter.stopSession(threadId);
+      }),
+    ),
+  );
+
+  it.effect("closes each requested form once on stop, disconnect or handler interruption", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        for (const end of ["stop", "disconnect", "handler-interrupt"] as const) {
+          const harness = yield* makeHarness({ withConnectionTermination: true });
+          const threadId = ThreadId.make(`mastra-form-terminal-${end}`);
+          yield* harness.adapter.startSession({
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "full-access",
+          });
+          const form = yield* harness.elicitationHandler()!({
+            mode: "form",
+            sessionId: "mastra-acp-session",
+            message: "Answer",
+            requestedSchema: {
+              type: "object",
+              properties: { answer: { type: "string" } },
+              required: ["answer"],
+            },
+          }).pipe(Effect.forkChild({ startImmediately: true }));
+          yield* Deferred.await(harness.elicitationRequested);
+          if (end === "stop") yield* harness.adapter.stopSession(threadId);
+          else if (end === "disconnect") {
+            yield* Deferred.succeed(harness.connectionTerminated, undefined);
+            yield* Deferred.await(harness.sessionExited);
+          } else yield* Fiber.interrupt(form);
+          yield* Deferred.await(harness.elicitationResolved);
+          const resolved = harness.events.filter((event) => event.type === "user-input.resolved");
+          expect(resolved).toHaveLength(1);
+          expect(resolved[0]!.payload.answers).toEqual({});
+          if (end === "handler-interrupt") yield* harness.adapter.stopSession(threadId);
+        }
+      }),
+    ),
+  );
+
   it.effect("requires an explicit decision for valid empty ACP forms", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1026,6 +1347,10 @@ it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
               ? { action: { action: "accept", content: {} } }
               : { action: { action: "decline" } },
           );
+          yield* Deferred.await(harness.elicitationResolved);
+          expect(
+            harness.events.filter((event) => event.type === "user-input.resolved"),
+          ).toHaveLength(1);
           yield* harness.adapter.stopSession(threadId);
         }
       }),
@@ -1127,6 +1452,12 @@ it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
               ? { action: { action: "cancel" } }
               : { action: { action: "accept", content: { approved: false, count: 2 } } },
           );
+          yield* Deferred.await(harness.elicitationResolved);
+          const resolved = harness.events.filter((event) => event.type === "user-input.resolved");
+          expect(resolved).toHaveLength(1);
+          expect(resolved[0]!.payload.answers).toEqual(
+            missingRequired ? {} : { approved: false, count: 2 },
+          );
           yield* harness.adapter.stopSession(threadId);
         }
       }),
@@ -1170,7 +1501,10 @@ it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
 
         expect(response).toEqual({ action: { action: "cancel" } });
         expect(Exit.isSuccess(turnResult)).toBe(true);
-        expect(harness.events.some((event) => event.type === "user-input.resolved")).toBe(false);
+        yield* Deferred.await(harness.elicitationResolved);
+        const resolved = harness.events.filter((event) => event.type === "user-input.resolved");
+        expect(resolved).toHaveLength(1);
+        expect(resolved[0]!.payload.answers).toEqual({});
 
         yield* harness.adapter.stopSession(threadId);
         yield* Deferred.await(harness.sessionExited);
