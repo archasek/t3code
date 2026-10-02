@@ -18,6 +18,7 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
 import { ServerConfig } from "../../config.ts";
+import { validateMastraCodeStringConstraints } from "../MastraCodeElicitationValidation.ts";
 import {
   type MastraCodeAdapterOptions,
   mapMastraCodeAcpError,
@@ -36,6 +37,7 @@ const makeHarness = Effect.fn("makeMastraCodeAdapterTestHarness")(function* (
     holdPromptDispatch?: boolean;
     holdCancel?: boolean;
     holdSecondPrompt?: boolean;
+    withConnectionTermination?: boolean;
     modeState?: {
       currentModeId: string;
       availableModes: ReadonlyArray<{ id: string; name: string; description?: string }>;
@@ -66,6 +68,7 @@ const makeHarness = Effect.fn("makeMastraCodeAdapterTestHarness")(function* (
   const secondTurnStarted = yield* Deferred.make<void>();
   const sessionExited = yield* Deferred.make<void>();
   const runtimeScopeClosed = yield* Deferred.make<void>();
+  const connectionTerminated = yield* Deferred.make<void>();
   const events: ProviderRuntimeEvent[] = [];
   const modeCalls: string[] = [];
   let turnStartedCount = 0;
@@ -105,15 +108,24 @@ const makeHarness = Effect.fn("makeMastraCodeAdapterTestHarness")(function* (
         })
       : Effect.succeed(options.modeState),
     getEvents: () =>
-      Stream.fromIterable(
-        options.availableCommands
-          ? [
-              {
-                _tag: "AvailableCommandsUpdated",
-                availableCommands: options.availableCommands,
-              } as never,
-            ]
-          : [],
+      Stream.concat(
+        Stream.fromIterable(
+          options.availableCommands
+            ? [
+                {
+                  _tag: "AvailableCommandsUpdated",
+                  availableCommands: options.availableCommands,
+                } as never,
+              ]
+            : [],
+        ),
+        options.withConnectionTermination
+          ? Stream.fromEffect(
+              Deferred.await(connectionTerminated).pipe(
+                Effect.as({ _tag: "ConnectionTerminated" } as never),
+              ),
+            )
+          : Stream.empty,
       ),
     drainEvents: Effect.void,
     prompt: (input, promptOptions) =>
@@ -213,6 +225,7 @@ const makeHarness = Effect.fn("makeMastraCodeAdapterTestHarness")(function* (
     elicitationRequested,
     sessionExited,
     runtimeScopeClosed,
+    connectionTerminated,
     promptCallCount: () => promptCallCount,
     cancelCallCount: () => cancelCallCount,
     permissionHandler: () => permissionHandler,
@@ -961,6 +974,123 @@ it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
     ),
   );
 
+  it.effect("cleans up a disconnected idle session without a user stop", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ withConnectionTermination: true });
+        const threadId = ThreadId.make("mastra-disconnected-idle");
+        yield* harness.adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        yield* Deferred.succeed(harness.connectionTerminated, undefined);
+        yield* Deferred.await(harness.sessionExited);
+        expect(yield* Deferred.isDone(harness.runtimeScopeClosed)).toBe(true);
+        expect(yield* harness.adapter.hasSession(threadId)).toBe(false);
+        expect(yield* harness.adapter.listSessions()).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("requires an explicit decision for valid empty ACP forms", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        for (const decision of ["accept", "decline"]) {
+          const harness = yield* makeHarness();
+          const threadId = ThreadId.make(`mastra-empty-form-${decision}`);
+          yield* harness.adapter.startSession({
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "full-access",
+          });
+          const form = yield* harness.elicitationHandler()!({
+            mode: "form",
+            sessionId: "mastra-acp-session",
+            message: "Proceed?",
+            requestedSchema: { type: "object", properties: {} },
+          }).pipe(Effect.forkChild({ startImmediately: true }));
+          yield* Deferred.await(harness.elicitationRequested);
+          const requested = harness.events
+            .filter((event) => event.type === "user-input.requested")
+            .at(-1)!;
+          const questions = requested.payload.questions;
+          expect(questions).toHaveLength(1);
+          yield* harness.adapter.respondToUserInput(
+            threadId,
+            ApprovalRequestId.make(String(requested.requestId)),
+            { [questions[0]!.id]: decision },
+          );
+          expect(yield* Fiber.join(form)).toEqual(
+            decision === "accept"
+              ? { action: { action: "accept", content: {} } }
+              : { action: { action: "decline" } },
+          );
+          yield* harness.adapter.stopSession(threadId);
+        }
+      }),
+    ),
+  );
+
+  it.effect("omits skipped optional fields and rejects skip mixed with real array values", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        for (const mixed of [false, true]) {
+          const harness = yield* makeHarness();
+          const threadId = ThreadId.make(`mastra-optional-form-${mixed}`);
+          yield* harness.adapter.startSession({
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "full-access",
+          });
+          const form = yield* harness.elicitationHandler()!({
+            mode: "form",
+            sessionId: "mastra-acp-session",
+            message: "Configure",
+            requestedSchema: {
+              type: "object",
+              properties: {
+                approved: { type: "boolean" },
+                nickname: { type: "string", minLength: 1 },
+                tags: { type: "array", items: { type: "string", enum: ["one", "two"] } },
+              },
+              required: ["approved"],
+            },
+          }).pipe(Effect.forkChild({ startImmediately: true }));
+          yield* Deferred.await(harness.elicitationRequested);
+          const requested = harness.events
+            .filter((event) => event.type === "user-input.requested")
+            .at(-1)!;
+          const questions = requested.payload.questions;
+          const nickname = questions.find((question) => question.id === "nickname")!;
+          const skipName = nickname.options.find(
+            (option) => option.label === "Leave unset",
+          )!.value!;
+          const skipTags = questions
+            .find((question) => question.id === "tags")!
+            .options.find((option) => option.label === "Leave unset")!.value!;
+          expect(nickname.allowCustomAnswer).toBe(true);
+          expect(questions.find((question) => question.id === "approved")!.options).toEqual([]);
+          yield* harness.adapter.respondToUserInput(
+            threadId,
+            ApprovalRequestId.make(String(requested.requestId)),
+            {
+              approved: "true",
+              nickname: skipName,
+              tags: mixed ? [skipTags, "one"] : [skipTags],
+            },
+          );
+          expect(yield* Fiber.join(form)).toEqual(
+            mixed
+              ? { action: { action: "cancel" } }
+              : { action: { action: "accept", content: { approved: true } } },
+          );
+          yield* harness.adapter.stopSession(threadId);
+        }
+      }),
+    ),
+  );
+
   it.effect("returns typed form answers and cancels a form with a missing required answer", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1096,6 +1226,47 @@ it.layer(adapterTestLayer)("MastraCodeAdapter", (it) => {
 });
 
 describe("Mastra Code ACP boundaries", () => {
+  it.live("validates ACP patterns and canonical string formats in an isolated process", () =>
+    Effect.gen(function* () {
+      const cases: ReadonlyArray<
+        readonly [EffectAcpSchema.ElicitationPropertySchema, string, boolean]
+      > = [
+        [{ type: "string", pattern: "abc" }, "xabcx", true],
+        [{ type: "string", pattern: "^abc$" }, "xabcx", false],
+        [{ type: "string", pattern: "(?=abc)abc" }, "abc", true],
+        [{ type: "string", pattern: "^(a)\\1$" }, "aa", true],
+        [{ type: "string", pattern: "" }, "", true],
+        [{ type: "string", pattern: "[" }, "abc", false],
+        [{ type: "string", pattern: null, format: null }, "abc", true],
+        [{ type: "string", format: "email" }, "a@example.com", true],
+        [{ type: "string", format: "email" }, "a@@example.com", false],
+        [{ type: "string", format: "uri" }, "urn:isbn:0451450523", true],
+        [{ type: "string", format: "uri" }, "relative/path", false],
+        [{ type: "string", format: "date" }, "2024-02-29", true],
+        [{ type: "string", format: "date" }, "2023-02-29", false],
+        [{ type: "string", format: "date-time" }, "2024-02-29T12:30:00+01:00", true],
+        [{ type: "string", format: "date-time" }, "2024-02-29T12:30:00", false],
+        [{ type: "string", pattern: "^b", format: "email" }, "a@example.com", false],
+      ];
+      for (const [property, answer, expected] of cases)
+        expect(yield* validateMastraCodeStringConstraints(property, answer)).toBe(expected);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("terminates pathological regex evaluation and releases validation admission", () =>
+    Effect.gen(function* () {
+      expect(
+        yield* validateMastraCodeStringConstraints(
+          { type: "string", pattern: "^(a+)+$" },
+          "a".repeat(10000) + "!",
+        ),
+      ).toBe(false);
+      expect(
+        yield* validateMastraCodeStringConstraints({ type: "string", pattern: "^ok$" }, "ok"),
+      ).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it("coerces form strings to declared booleans and numbers without truthiness", () => {
     expect(coerceMastraCodeElicitationAnswer({ type: "boolean" }, "false")).toBe(false);
     expect(coerceMastraCodeElicitationAnswer({ type: "boolean" }, "true")).toBe(true);

@@ -33,6 +33,10 @@ describe("MastraCodeSettings binary path", () => {
         .binaryPath,
     ).toBe("C:\\Program Files\\Mastra Code\\mastracode.exe");
     expect(
+      decodeMastraCodeSettings({ binaryPath: "C:/Program Files/Mastra Code/mastracode.exe" })
+        .binaryPath,
+    ).toBe("C:/Program Files/Mastra Code/mastracode.exe");
+    expect(
       decodeMastraCodeSettings({ binaryPath: "\\\\server\\share\\mastracode.exe" }).binaryPath,
     ).toBe("\\\\server\\share\\mastracode.exe");
   });
@@ -41,7 +45,7 @@ describe("MastraCodeSettings binary path", () => {
     expect(() => decodeMastraCodeSettings({ binaryPath: "./bin/mastracode" })).toThrow();
     expect(() => decodeMastraCodeSettings({ binaryPath: "..\\tools\\mastracode.exe" })).toThrow();
     expect(() =>
-      decodeMastraCodeSettings({ binaryPath: "C:/project/bin/mastracode.exe" }),
+      decodeMastraCodeSettings({ binaryPath: "C:project\\bin\\mastracode.exe" }),
     ).toThrow();
     expect(() => decodeMastraCodeSettings({ binaryPath: "\\\\workspace" })).toThrow();
     expect(() => decodeMastraCodeSettings({ binaryPath: "\\\\.\\pipe\\mastracode.exe" })).toThrow();

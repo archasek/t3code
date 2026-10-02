@@ -31,6 +31,7 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
+import { ChildProcessSpawner } from "effect/unstable/process";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
@@ -38,6 +39,7 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { ServerConfig } from "../../config.ts";
 import { withMastraCodeThreadStorage } from "../MastraCodeEnvironment.ts";
+import { validateMastraCodeStringConstraints } from "../MastraCodeElicitationValidation.ts";
 import { buildRuntimeInstructions } from "../RuntimeInstructions.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
@@ -208,6 +210,29 @@ function isInside(path: Path.Path, root: string, candidate: string): boolean {
 
 type ElicitationValue = EffectAcpSchema.ElicitationContentValue;
 
+function elicitationEnumValues(property: EffectAcpSchema.ElicitationPropertySchema) {
+  if (property.type === "string")
+    return property.enum ?? property.oneOf?.map((entry) => entry.const);
+  if (property.type === "array")
+    return "enum" in property.items
+      ? property.items.enum
+      : property.items.anyOf.map((entry) => entry.const);
+  return undefined;
+}
+
+function optionalElicitationSkipValue(
+  property: EffectAcpSchema.ElicitationPropertySchema,
+  requestId: string,
+  id: string,
+) {
+  let value = `${requestId}:omit:${id}`;
+  const allowed = elicitationEnumValues(property);
+  while (allowed?.includes(value)) value += ":omit";
+  return value;
+}
+
+const EMPTY_FORM_CONFIRMATION_ID = "empty-form-confirmation";
+
 export function coerceMastraCodeElicitationAnswer(
   property: EffectAcpSchema.ElicitationPropertySchema,
   answer: unknown,
@@ -231,7 +256,7 @@ export function coerceMastraCodeElicitationAnswer(
       if (typeof answer !== "string") return undefined;
       if (property.minLength != null && answer.length < property.minLength) return undefined;
       if (property.maxLength != null && answer.length > property.maxLength) return undefined;
-      const allowed = property.enum ?? property.oneOf?.map((entry) => entry.const);
+      const allowed = elicitationEnumValues(property);
       return allowed && !allowed.includes(answer) ? undefined : answer;
     }
     case "array": {
@@ -248,30 +273,51 @@ export function coerceMastraCodeElicitationAnswer(
   }
 }
 
-function elicitationQuestions(request: Extract<ElicitationRequest, { mode: "form" }>) {
+function elicitationQuestions(
+  request: Extract<ElicitationRequest, { mode: "form" }>,
+  requestId: string,
+) {
   const properties = request.requestedSchema.properties ?? {};
   const required = new Set(request.requestedSchema.required ?? []);
+  if (Object.keys(properties).length === 0) {
+    return [
+      {
+        id: EMPTY_FORM_CONFIRMATION_ID,
+        header: "Confirmation",
+        question: request.message || "Continue with this request?",
+        options: [
+          {
+            label: "Continue",
+            description: "Accept this request without additional fields.",
+            value: "accept",
+          },
+          { label: "Decline", description: "Decline this request.", value: "decline" },
+        ],
+        allowCustomAnswer: false,
+        multiSelect: false,
+      },
+    ];
+  }
   return Object.entries(properties).map(([id, property]) => {
-    const enumValues =
-      property.type === "string"
-        ? (property.enum ?? property.oneOf?.map((entry) => entry.const))
-        : property.type === "array"
-          ? "enum" in property.items
-            ? property.items.enum
-            : property.items.anyOf.map((entry) => entry.const)
-          : undefined;
+    const enumValues = elicitationEnumValues(property);
     const options =
       enumValues?.map((value) => ({
         label: value,
         description: property.description ?? "",
         value,
       })) ?? [];
+    if (!required.has(id))
+      options.push({
+        label: "Leave unset",
+        description: "Optional field; do not send a value.",
+        value: optionalElicitationSkipValue(property, requestId, id),
+      });
     return {
       id,
       header: text(property.title) ?? (required.has(id) ? "Required" : "Optional"),
       question: [request.message, text(property.description)].filter(Boolean).join("\n\n") || id,
       options,
-      allowCustomAnswer: options.length === 0,
+      allowCustomAnswer: !enumValues?.length,
       multiSelect: property.type === "array",
     };
   });
@@ -326,6 +372,8 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig;
+  const ownerScope = yield* Scope.Scope;
+  const validationSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const sessions = new Map<ThreadId, MastraCodeSessionContext>();
   const locks = yield* SynchronizedRef.make(new Map<ThreadId, Semaphore.Semaphore>());
   const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
@@ -730,7 +778,7 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
                   threadId: input.threadId,
                   turnId,
                   requestId: runtimeRequestId,
-                  payload: { questions: elicitationQuestions(request) },
+                  payload: { questions: elicitationQuestions(request, requestId) },
                   raw: {
                     source: "acp.jsonrpc",
                     method: "session/elicitation",
@@ -746,11 +794,37 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
                   return { action: { action: "cancel" } } as const;
                 }
                 const content: Record<string, ElicitationValue> = {};
+                const properties = request.requestedSchema.properties ?? {};
+                if (Object.keys(properties).length === 0) {
+                  const confirmation = resolution.answers[EMPTY_FORM_CONFIRMATION_ID];
+                  if (confirmation !== "accept")
+                    return {
+                      action: { action: confirmation === "decline" ? "decline" : "cancel" },
+                    } as const;
+                }
                 for (const [key, value] of Object.entries(resolution.answers)) {
-                  const properties = request.requestedSchema.properties ?? {};
                   if (!Object.hasOwn(properties, key)) continue;
-                  const coerced = coerceMastraCodeElicitationAnswer(properties[key]!, value);
+                  const property = properties[key]!;
+                  if (!request.requestedSchema.required?.includes(key)) {
+                    const skip = optionalElicitationSkipValue(property, requestId, key);
+                    if (value === skip || (Array.isArray(value) && value.includes(skip))) {
+                      if (Array.isArray(value) && value.length !== 1)
+                        return { action: { action: "cancel" } } as const;
+                      continue;
+                    }
+                  }
+                  const coerced = coerceMastraCodeElicitationAnswer(property, value);
                   if (coerced === undefined) return { action: { action: "cancel" } } as const;
+                  if (
+                    !(yield* validateMastraCodeStringConstraints(property, coerced).pipe(
+                      Effect.provideService(
+                        ChildProcessSpawner.ChildProcessSpawner,
+                        validationSpawner,
+                      ),
+                      Effect.provideService(Path.Path, path),
+                    ))
+                  )
+                    return { action: { action: "cancel" } } as const;
                   content[key] = coerced;
                 }
                 if (request.requestedSchema.required?.some((key) => !Object.hasOwn(content, key)))
@@ -850,13 +924,13 @@ export const makeMastraCodeAdapter = Effect.fn("makeMastraCodeAdapter")(function
                   lastError: "Mastra Code ACP connection ended.",
                   updatedAt: yield* nowIso,
                 };
-                if (sessionContext.activeTurnId === undefined) {
-                  yield* emitSessionExited(
-                    sessionContext,
-                    "error",
-                    "Mastra Code ACP connection ended.",
-                  );
-                }
+                yield* withThreadLock(
+                  sessionContext.threadId,
+                  Effect.gen(function* () {
+                    if (sessions.get(sessionContext.threadId) !== sessionContext) return;
+                    yield* stopSessionInternal(sessionContext);
+                  }),
+                ).pipe(Effect.forkIn(ownerScope));
                 return;
               case "AvailableCommandsUpdated":
                 yield* (

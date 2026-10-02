@@ -909,7 +909,7 @@ export const MastraCodeSettings = makeProviderSettingsSchema(
           (value) =>
             value.startsWith("/") ||
             /^\\\\(?![.?]\\)[^\\]+\\[^\\]+(?:\\|$)/.test(value) ||
-            (/^[A-Za-z]:/.test(value) && value[2] === "\\") ||
+            (/^[A-Za-z]:/.test(value) && (value[2] === "\\" || value[2] === "/")) ||
             (!/[\\/]/.test(value) &&
               !/^[A-Za-z]:/.test(value) &&
               value !== "." &&
