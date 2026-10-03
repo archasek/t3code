@@ -8,17 +8,7 @@
 #   gh run watch && gh run view --log-failed
 name: Windows Tests
 
-on:
-  workflow_dispatch:
-    inputs:
-      package:
-        description: "Workspace directory to test, e.g. apps/server or packages/shared. Empty runs every package except apps/server."
-        type: string
-        default: ""
-      files:
-        description: "Space-separated test files relative to the package directory. Empty runs the package's whole suite. Requires package."
-        type: string
-        default: ""
+on: []
 
 permissions:
   contents: read
