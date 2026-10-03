@@ -96,6 +96,8 @@ export interface AcpSessionRuntimeOptions {
   readonly resumeMethod?: "load" | "resume";
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
+  /** Require native load acknowledgement, even after replay becomes idle. */
+  readonly sessionLoadRequireRpcResponse?: boolean;
   readonly interruptPromptOnCancel?: boolean;
   /** Optional provider metadata forwarded on `session/cancel`. */
   readonly cancelMeta?: EffectAcpSchema.CancelNotification["_meta"];
@@ -2066,10 +2068,10 @@ export const make = (
             const idleFiber = yield* waitForSessionLoadReplayIdle({
               gateRef: sessionLoadGateRef,
             }).pipe(Effect.forkIn(runtimeScope));
-            const loaded = yield* Effect.raceFirst(
-              acp.agent.loadSession(loadPayload),
-              Fiber.join(idleFiber),
-            ).pipe(
+            const load = options.sessionLoadRequireRpcResponse
+              ? acp.agent.loadSession(loadPayload)
+              : Effect.raceFirst(acp.agent.loadSession(loadPayload), Fiber.join(idleFiber));
+            const loaded = yield* load.pipe(
               Effect.ensuring(Fiber.interrupt(idleFiber).pipe(Effect.ignore)),
               Effect.timeoutOption(sessionLoadTimeout),
               Effect.flatMap((result) =>
@@ -2079,8 +2081,9 @@ export const make = (
                       new EffectAcpErrors.AcpTransportError({
                         operation: "call-rpc",
                         method: "session/load",
-                        detail:
-                          "session/load timed out waiting for RPC response or replay idle gap",
+                        detail: options.sessionLoadRequireRpcResponse
+                          ? "session/load timed out waiting for the RPC response"
+                          : "session/load timed out waiting for RPC response or replay idle gap",
                         cause: undefined,
                       }),
                     ),

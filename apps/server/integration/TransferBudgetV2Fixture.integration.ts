@@ -34,7 +34,7 @@ export function threadCreated(provider: ProviderDriverKind): OrchestrationV2Doma
       providerInstanceId: ProviderInstanceId.make(provider),
       modelSelection: {
         instanceId: ProviderInstanceId.make(provider),
-        model: provider === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
+        model: provider === "mastraCode" ? "default" : provider === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
       },
       runtimeMode: "full-access",
       interactionMode: "default",
@@ -72,7 +72,7 @@ export function turnEvents(
     providerInstanceId,
     modelSelection: {
       instanceId: ProviderInstanceId.make(provider),
-      model: provider === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
+      model: provider === "mastraCode" ? "default" : provider === "codex" ? "gpt-5.4" : "claude-sonnet-4-6",
     },
     providerThreadId: null,
     userMessageId,

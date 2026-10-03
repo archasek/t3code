@@ -497,6 +497,23 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("rejects Mastra Code background text generation selections", () =>
+    Effect.gen(function* () {
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      const instanceId = ProviderInstanceId.make("mc-custom");
+      const next = yield* serverSettings.updateSettings({
+        providerInstances: {
+          [instanceId]: { driver: ProviderDriverKind.make("mastraCode"), enabled: true, config: {} },
+        },
+        textGenerationModelSelection: { instanceId, model: "default" },
+      });
+      assert.notEqual(next.textGenerationModelSelection.instanceId, instanceId);
+      assert.notEqual(next.textGenerationModelSelection.instanceId, "mastraCode");
+      const writerSettings = { ...next, sourceControlWriterModelSelection: { instanceId, model: "default" } };
+      assert.deepEqual(ServerSettingsModule.resolveSourceControlWriterModelSelection(writerSettings), next.textGenerationModelSelection);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("preserves custom provider instance text generation selections", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;

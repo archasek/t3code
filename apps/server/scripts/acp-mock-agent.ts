@@ -1720,8 +1720,16 @@ const program = Effect.gen(function* () {
           requestedSchema: {
             type: "object",
             properties: {
-              approved: { type: "boolean", title: "Approved" },
+              approved: process.env.T3_ACP_ELICITATION_STRING === "1"
+                ? { type: "string", format: "email", title: "Email" }
+                : { type: "boolean", title: "Approved" },
+              ...(process.env.T3_ACP_ELICITATION_STRING === "1"
+                ? { secondEmail: { type: "string", format: "email", title: "Second email" } }
+                : {}),
             },
+            ...(process.env.T3_ACP_ELICITATION_STRING === "1"
+              ? { required: ["approved", "secondEmail"] }
+              : {}),
           },
           ...(emitMcpToolApprovalElicitation
             ? { _meta: { codex_approval_kind: "mcp_tool_call" } }

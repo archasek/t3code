@@ -90,6 +90,9 @@ export function resolveSourceControlWriterModelSelection(
   if (!selection || !isModelSelectionProviderEnabled(settings, selection)) {
     return settings.textGenerationModelSelection;
   }
+  if (!isModelSelectionTextGenerationCapable(settings, selection)) {
+    return settings.textGenerationModelSelection;
+  }
   if (providers === undefined) {
     return selection;
   }
@@ -100,6 +103,11 @@ export function resolveSourceControlWriterModelSelection(
     isProviderTextGenerationCapable(provider)
     ? selection
     : settings.textGenerationModelSelection;
+}
+
+export function isModelSelectionTextGenerationCapable(settings: ServerSettings, selection: ModelSelection): boolean {
+  const driver = settings.providerInstances[selection.instanceId]?.driver ?? selection.instanceId;
+  return driver !== "mastraCode" && driver !== "acpRegistry";
 }
 
 export interface PersistedServerObservabilitySettings {

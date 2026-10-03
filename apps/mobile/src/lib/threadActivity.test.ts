@@ -1858,6 +1858,14 @@ const multiSelectQuestion = {
 } as const;
 
 describe("pending user input answers", () => {
+  it.each(["", "  ", " padded ", "first\nsecond\n"])("preserves raw MC answer %j", (customAnswer) => {
+    const question = { ...singleSelectQuestion, answerFormat: "raw-string" as const };
+    expect(buildPendingUserInputAnswers([question], {})).toBeNull();
+    const draft = setPendingUserInputCustomAnswer(question, { selectedOptionValues: ["Go"] }, customAnswer);
+    expect(buildPendingUserInputAnswers([question], { runtime: draft })).toEqual({ runtime: customAnswer });
+    const option = togglePendingUserInputOptionSelection(question, draft, "Go");
+    expect(buildPendingUserInputAnswers([question], { runtime: option })).toEqual({ runtime: "Go" });
+  });
   it("replaces single-select options and toggles multi-select options", () => {
     expect(
       togglePendingUserInputOptionSelection(

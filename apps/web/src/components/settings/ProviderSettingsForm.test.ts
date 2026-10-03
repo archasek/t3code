@@ -8,6 +8,20 @@ import {
 } from "./ProviderSettingsForm";
 
 describe("ProviderSettingsForm helpers", () => {
+  it("configures Mastra Code through its dedicated driver schema", () => {
+    const mc = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("mastraCode")];
+    expect(mc?.label).toBe("Mastra Code");
+    const fields = deriveProviderSettingsFields(mc!);
+    const binary = fields.find((field) => field.key === "binaryPath");
+    expect(binary).toBeDefined();
+    expect(fields.map((field) => field.key)).not.toContain("customModels");
+    const original = { customModels: ["model-a"] };
+    const configured = nextProviderConfigWithFieldValue(original, binary!, "/opt/bin/mastracode");
+    expect(configured).toEqual({ ...original, binaryPath: "/opt/bin/mastracode" });
+    expect(nextProviderConfigWithFieldValue(configured, binary!, "")).toEqual(original);
+    expect(original).toEqual({ customModels: ["model-a"] });
+  });
+
   it("derives visible provider config fields from the client definition schema", () => {
     const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
 

@@ -60,6 +60,28 @@ const projection: OrchestrationV2ThreadProjection = {
 };
 
 describe("pending v2 questions", () => {
+  it("preserves MC raw-string questions and exact answers across projection reconnect", () => {
+    const raw = {
+      ...projection,
+      turnItems: projection.turnItems.map((item) => item.type === "user_input_request" ? {
+        ...item,
+        questions: item.questions.map((question) => ({ ...question, answerFormat: "raw-string" as const, allowCustomAnswer: true })),
+      } : item),
+    };
+    const pending = derivePendingThreadRequests(raw);
+    expect(pending.userInputs[0]?.questions[0]).toMatchObject({ answerFormat: "raw-string", multiSelect: false });
+    for (const answer of ["", "   ", "  first\nsecond  "]) {
+      const item = raw.turnItems[0]!;
+      const answered = {
+        runtimeRequests: raw.runtimeRequests.map((request) => ({ ...request, status: "resolved" as const, answers: { next: answer } })),
+        visibleTurnItems: [{ item, position: 0, sourceItemId: item.id, sourceThreadId: item.threadId, visibility: "local" as const }],
+      };
+      const restored = createQuestionHistoryProjector()(answered);
+      expect(restored[0]?.item).toMatchObject({ questionAnswer: { answers: { next: answer } } });
+      expect(derivePendingThreadRequests({ ...raw, runtimeRequests: answered.runtimeRequests }).userInputs).toEqual([]);
+    }
+  });
+
   it("keeps message responses available after the originating runtime exits", () => {
     expect(projection.providerSessions).toEqual([]);
     expect(derivePendingThreadRequests(projection).userInputs).toEqual([

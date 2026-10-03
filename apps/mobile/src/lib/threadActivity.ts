@@ -354,8 +354,9 @@ function resolvePendingUserInputAnswer(
 ): string | ReadonlyArray<string> | null {
   if (draft?.attachmentsBlocked) return null;
   const customAnswer =
-    question.allowCustomAnswer === false ? null : normalizeDraftAnswer(draft?.customAnswer);
-  if (customAnswer) {
+    question.allowCustomAnswer === false ? null : question.answerFormat === "raw-string"
+      ? (draft?.customAnswer ?? null) : normalizeDraftAnswer(draft?.customAnswer);
+  if (customAnswer !== null) {
     return customAnswer;
   }
 
@@ -1542,7 +1543,7 @@ export function setPendingUserInputCustomAnswer(
   }
 
   const selectedOptionValues =
-    customAnswer.trim().length > 0
+    question.answerFormat === "raw-string" || customAnswer.trim().length > 0
       ? undefined
       : normalizeSelectedOptionValues(question, draft?.selectedOptionValues);
   return {
@@ -1556,7 +1557,8 @@ export function isPendingUserInputOptionSelected(
   draft: PendingUserInputDraftAnswer | undefined,
   optionValue: string,
 ): boolean {
-  if (question.allowCustomAnswer !== false && normalizeDraftAnswer(draft?.customAnswer)) {
+  if (question.allowCustomAnswer !== false && (question.answerFormat === "raw-string"
+    ? draft?.customAnswer !== undefined : normalizeDraftAnswer(draft?.customAnswer) !== null)) {
     return false;
   }
 
@@ -1589,7 +1591,7 @@ export function togglePendingUserInputOptionSelection(
       : [...selectedOptionValues, resolvedOptionValue];
 
     return {
-      customAnswer: "",
+      ...(question.answerFormat === "raw-string" ? {} : { customAnswer: "" }),
       ...(nextSelectedOptionValues.length > 0
         ? { selectedOptionValues: nextSelectedOptionValues }
         : {}),
@@ -1597,7 +1599,7 @@ export function togglePendingUserInputOptionSelection(
   }
 
   return {
-    customAnswer: "",
+    ...(question.answerFormat === "raw-string" ? {} : { customAnswer: "" }),
     selectedOptionValues: [resolvedOptionValue],
   };
 }

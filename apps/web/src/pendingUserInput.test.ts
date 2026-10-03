@@ -54,6 +54,15 @@ const nativeChoiceQuestion = {
 } as const;
 
 describe("resolvePendingUserInputAnswer", () => {
+  it.each(["", "  ", " padded ", "first\nsecond\n"])("preserves raw MC answer %j", (customAnswer) => {
+    const question = { ...singleSelectQuestion, answerFormat: "raw-string" as const };
+    expect(resolvePendingUserInputAnswer(question, undefined)).toBeNull();
+    const draft = setPendingUserInputCustomAnswer({ selectedOptionValues: ["Orchestration-first"] }, customAnswer, question);
+    expect(resolvePendingUserInputAnswer(question, draft)).toBe(customAnswer);
+    expect(derivePendingUserInputProgress([question], { scope: draft }, 0).usingCustomAnswer).toBe(true);
+    const option = togglePendingUserInputOptionSelection(question, draft, "Orchestration-first");
+    expect(resolvePendingUserInputAnswer(question, option)).toBe("Orchestration-first");
+  });
   it("prefers a custom answer over selected options", () => {
     expect(
       resolvePendingUserInputAnswer(singleSelectQuestion, {

@@ -952,7 +952,7 @@ it.layer(TestLayer)("OrchestrationV2LayerLive", (it) => {
     }),
   );
 
-  it.effect("answers an async question after its provider exits and commits the answer once", () =>
+  it.effect("answers an async question after its provider exits and commits racing clients once", () =>
     Effect.gen(function* () {
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const eventSink = yield* EventSink.EventSinkV2;
@@ -1070,8 +1070,19 @@ it.layer(TestLayer)("OrchestrationV2LayerLive", (it) => {
         requestId,
         answers: { color: "  Blue  " },
       };
-      const accepted = yield* orchestrator.dispatch(command);
-      const repeated = yield* orchestrator.dispatch(command);
+      const raced = yield* Effect.all([
+        orchestrator.dispatch(command).pipe(Effect.result),
+        orchestrator.dispatch({ ...command, commandId: CommandId.make("runtime-async-question-other-client") }).pipe(Effect.result),
+      ], { concurrency: 2 });
+      assert.equal(raced.filter((result) => result._tag === "Success").length, 1);
+      assert.equal(raced.filter((result) => result._tag === "Failure").length, 1);
+      const winner = raced.find((result) => result._tag === "Success");
+      if (winner === undefined || winner._tag !== "Success") return yield* Effect.die("Expected one committed response");
+      const winningCommand = raced[0]?._tag === "Success"
+        ? command
+        : { ...command, commandId: CommandId.make("runtime-async-question-other-client") };
+      const accepted = winner.success;
+      const repeated = yield* orchestrator.dispatch(winningCommand);
       assert.equal(repeated.sequence, accepted.sequence);
       const answered = yield* orchestrator.getThreadProjection(threadId);
       assert.equal(answered.runtimeRequests[0]?.status, "resolved");

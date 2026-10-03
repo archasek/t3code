@@ -541,6 +541,9 @@ importers:
       '@opencode/schema':
         specifier: 2.0.18
         version: 2.0.18
+      ajv-formats:
+        specifier: 3.0.1
+        version: 3.0.1(ajv@8.20.0)
       diff:
         specifier: 8.0.3
         version: 8.0.3

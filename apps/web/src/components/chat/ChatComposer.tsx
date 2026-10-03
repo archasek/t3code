@@ -6620,6 +6620,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     answers={activePendingDraftAnswers}
                     questionIndex={activePendingQuestionIndex}
                     onToggleOption={onSelectActivePendingUserInputOption}
+                    onChangeCustomAnswer={(id, value) => onChangeActivePendingUserInputCustomAnswer(id, value, value.length, value.length, false)}
                     onAdvance={onAdvanceActivePendingUserInput}
                     onDismiss={onDismissActivePendingUserInput}
                   />
@@ -6640,6 +6641,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       answers={activePendingDraftAnswers}
                       questionIndex={activePendingQuestionIndex}
                       onToggleOption={onSelectActivePendingUserInputOption}
+                      onChangeCustomAnswer={(id, value) => onChangeActivePendingUserInputCustomAnswer(id, value, value.length, value.length, false)}
                       onAdvance={onAdvanceActivePendingUserInput}
                       onDismiss={onDismissActivePendingUserInput}
                     />

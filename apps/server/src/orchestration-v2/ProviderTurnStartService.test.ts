@@ -153,6 +153,7 @@ it("does not commit running state when inherited background routing cannot be re
 });
 
 function makeLocalCommandHarness(input: {
+  readonly driver?: "codex" | "mastraCode";
   readonly text: string;
   readonly previousNativeSession?: boolean;
   readonly previousMessages?: ReadonlyArray<string>;
@@ -200,7 +201,7 @@ function makeLocalCommandHarness(input: {
   };
   const providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
     id: providerThreadId,
-    driver: ProviderDriverKind.make("codex"),
+    driver: ProviderDriverKind.make(input.driver ?? "codex"),
     providerInstanceId: newInstanceId,
     providerSessionId,
     appThreadId: threadId,
@@ -388,7 +389,7 @@ function makeLocalCommandHarness(input: {
           cause: "native thread is gone",
         }),
       ),
-    ensureThread: () => Effect.succeed(providerThread),
+    ensureThread: vi.fn(() => Effect.succeed(providerThread)),
   };
   const open = vi.fn(() =>
     input.interruptOpen === true
@@ -498,6 +499,7 @@ function makeLocalCommandHarness(input: {
   );
   return {
     open,
+    ensureReplacementThread: resumeFallbackSession.ensureThread,
     writeIfRunCurrent,
     startRootRun,
     tryHandlePromptCommand,
@@ -621,6 +623,21 @@ effectIt.effect("does not overwrite a run interrupted while its provider session
     expect(projection.nodes[0]?.status).toBe("pending");
     expect(projection.turnItems).toEqual([]);
     expect(harness.events).toEqual([]);
+  }),
+);
+
+effectIt.effect("fails an MC resume instead of attempting a history-only replacement", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Continue", driver: "mastraCode",
+      historyReadFailureAfterFallback: new Error("history must not be read for a replacement"),
+    });
+    yield* harness.start;
+    expect(harness.ensureReplacementThread).not.toHaveBeenCalled();
+    expect(harness.startRootRun).not.toHaveBeenCalled();
+    expect(harness.projection().runs.at(-1)?.status).toBe("failed");
+    expect(harness.projection().providerThreads.at(-1)?.nativeThreadRef?.nativeId).toBe("native-resume-thread");
+    expect(harness.projection().turnItems).toMatchObject([{ type: "error", failure: { message: "native thread is gone" } }]);
   }),
 );
 

@@ -38,6 +38,7 @@
     "@opencode/client": "2.0.18",
     "@opencode/protocol": "2.0.18",
     "@opencode/schema": "2.0.18",
+    "ajv-formats": "3.0.1",
     "diff": "8.0.3",
     "effect": "catalog:",
     "jose": "catalog:",

@@ -220,6 +220,7 @@ it.live(
       for (const provider of [
         ProviderDriverKind.make("codex"),
         ProviderDriverKind.make("claudeAgent"),
+        ProviderDriverKind.make("mastraCode"),
       ]) {
         const counter = makeSqlStatementCounter();
         const run = yield* Effect.scoped(

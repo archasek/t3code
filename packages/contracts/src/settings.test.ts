@@ -6,6 +6,7 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  MastraCodeSettings,
   DEFAULT_SERVER_SETTINGS,
   resolveProviderInstanceEnabled,
   ServerSettings,
@@ -19,6 +20,25 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+
+describe("Mastra Code executable settings", () => {
+  const decode = Schema.decodeUnknownSync(MastraCodeSettings);
+  it("round-trips opt-in server settings and accepts provider patches", () => {
+    expect(decodeServerSettings({}).providers.mastraCode.enabled).toBe(false);
+    const patch = { providers: { mastraCode: { enabled: true, binaryPath: "/opt/mastra/mastracode" } } };
+    expect(decodeServerSettingsPatch(patch)).toEqual(patch);
+    expect(encodeServerSettings(decodeServerSettings(patch))).toMatchObject(patch);
+  });
+  it("is opt-in and defaults to the native CLI", () => {
+    expect(decode({})).toMatchObject({ enabled: false, binaryPath: "mastracode" });
+  });
+  it.each(["mastracode", "/opt/mastra/bin/mastracode", "C:\\Mastra\\mastracode.exe", "\\\\server\\share\\mastracode.exe"])("accepts %s", (binaryPath) => {
+    expect(decode({ binaryPath }).binaryPath).toBe(binaryPath);
+  });
+  it.each(["./mastracode", "..\\mastracode.exe", "C:mastracode.exe", "\\\\workspace", "\\\\.\\pipe\\mastracode.exe"])("rejects workspace-relative or device path %s", (binaryPath) => {
+    expect(() => decode({ binaryPath })).toThrow();
+  });
+});
 
 describe("ServerSettings response streaming", () => {
   it("defaults to paragraph buffering", () => {

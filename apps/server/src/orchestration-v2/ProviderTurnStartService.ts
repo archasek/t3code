@@ -683,6 +683,9 @@ export const layer: Layer.Layer<
         if (resumed._tag === "Success") {
           return resumed.success;
         }
+        if (session.driver === "mastraCode") {
+          return yield* loadFromProvider(Effect.fail(resumed.failure));
+        }
 
         yield* Effect.logWarning("Provider resume failed; attempting a fresh native session", {
           driver: session.driver,

@@ -14,6 +14,8 @@ import type { SqlError } from "effect/unstable/sql/SqlError";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import * as ServerConfig from "../../config.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
+import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
+import type { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as ThreadManagementService from "../ThreadManagementService.ts";
 import * as McpSessionRegistryTestkit from "../../mcp/McpSessionRegistry.testkit.ts";
@@ -235,7 +237,7 @@ export function makeOrchestratorV2ProviderReplayLayer<
     readonly replayGate?: ProviderReplayGate;
   } = {},
 ): Layer.Layer<
-  Orchestrator.OrchestratorV2 | EffectWorker.OrchestrationEffectWorkerV2 | EventSink.EventSinkV2,
+  Orchestrator.OrchestratorV2 | EffectWorker.OrchestrationEffectWorkerV2 | EventSink.EventSinkV2 | ThreadManagementService.ThreadManagementService | OrchestrationEventStore,
   Error | MigrationError | PlatformError.PlatformError | SqlError
 > {
   const registryLayer = harness.makeProviderAdapterRegistryLayer(
@@ -263,7 +265,7 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
     readonly continueThreadsAfterServerUpdate?: boolean;
   } = {},
 ): Layer.Layer<
-  Orchestrator.OrchestratorV2 | EffectWorker.OrchestrationEffectWorkerV2 | EventSink.EventSinkV2,
+  Orchestrator.OrchestratorV2 | EffectWorker.OrchestrationEffectWorkerV2 | EventSink.EventSinkV2 | ThreadManagementService.ThreadManagementService | OrchestrationEventStore,
   Error | MigrationError | PlatformError.PlatformError | SqlError
 > {
   const serverConfigLayer = Layer.effect(
@@ -425,6 +427,10 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
         dispatch: orchestrator.dispatch,
         getThreadRecords: orchestrator.getThreadRecords,
         getThreadProjection: orchestrator.getThreadProjection,
+        ensureLegacyTranscript: () => Effect.void,
+        getThreadSnapshot: orchestrator.getThreadSnapshot,
+        getThreadSnapshotWindow: orchestrator.getThreadSnapshotWindow,
+        streamStoredEventsFrom: orchestrator.streamStoredEventsFrom,
       });
     }),
   ).pipe(Layer.provide(orchestratorProvided));
@@ -456,6 +462,8 @@ export function makeOrchestratorV2ReplayLayerWithRegistry<Error>(
   );
   const replayRuntime = Layer.mergeAll(
     orchestratorProvided,
+    threadManagementProvided,
+    OrchestrationEventStoreLive.pipe(Layer.provide(databaseLayer)),
     effectWorkerProvided,
     eventSinkProvided,
     continuationWorkerProvided,

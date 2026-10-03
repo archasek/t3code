@@ -128,6 +128,8 @@ export const ACP_PROTOCOL = "acp.ndjson-jsonrpc" as const;
 const ACP_DEFERRED_FINALIZE_DEBOUNCE: Duration.Input = "3000 millis";
 
 export interface AcpAdapterV2RuntimeInput {
+  /** Stable application identity for thread-scoped native storage. */
+  readonly threadId: ThreadId | null;
   readonly cwd: string;
   /**
    * Policy the session opened with. A runtime-mode change reopens the session,
@@ -211,6 +213,8 @@ export interface AcpAdapterV2ExtensionContext {
 }
 
 export interface AcpAdapterV2Flavor {
+  /** Persisted native conversations must not silently become fresh sessions. */
+  readonly requireNativeSessionRestore?: boolean;
   /** Interprets provider-specific prompt errors before they cross into orchestration. */
   readonly promptFailure?: (cause: unknown) => OrchestrationV2ProviderFailure;
   readonly driver: ProviderDriverKind;
@@ -221,6 +225,7 @@ export interface AcpAdapterV2Flavor {
   ) => EffectAcpSchema.SessionNotification;
   readonly onAvailableCommandsUpdate?: (
     commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+    cwd: string,
   ) => Effect.Effect<void>;
   readonly onSessionConfigurationUpdate?: (
     configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>,
@@ -294,6 +299,32 @@ export interface AcpAdapterV2Flavor {
     policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
     request: EffectAcpSchema.RequestPermissionRequest,
   ) => AcpPermissionDisposition;
+  /** Provider-specific plan preparation; shared admission still owns the request. */
+  readonly preparePermissionRequest?: (input: {
+    readonly request: EffectAcpSchema.RequestPermissionRequest;
+    readonly threadId: ThreadId;
+    readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
+  }) => Effect.Effect<{
+    readonly proposedPlanMarkdown?: string;
+  }, EffectAcpErrors.AcpError>;
+  /** Reserve native form capacity before publishing a durable user question.
+   * The returned idempotent release runs when the native write settles. */
+  readonly acquireFormElicitation?: () => Effect.Effect<Effect.Effect<void>, EffectAcpErrors.AcpError>;
+  /** Schema projection only; waiting and cancellation remain shared. */
+  readonly prepareFormElicitation?: (input: {
+    readonly request: {
+      readonly mode: "form";
+      readonly message: string;
+      readonly requestedSchema: unknown;
+    };
+    readonly nativeRequestId: string;
+    readonly threadId: ThreadId;
+  }) => {
+    readonly questions: ReadonlyArray<OrchestrationV2UserInputQuestion>;
+    readonly respond: (
+      answers: ProviderUserInputAnswers | null,
+    ) => Effect.Effect<EffectAcpSchema.CreateElicitationResponse, EffectAcpErrors.AcpError>;
+  };
   /** Approval choices to advertise on the approval card for a permission request. */
   readonly approvalOptions?: (
     request: EffectAcpSchema.RequestPermissionRequest,
@@ -637,6 +668,7 @@ export const AcpProviderCapabilitiesV2 = {
 function negotiatedCapabilities(
   base: OrchestrationV2ProviderCapabilities,
   started: AcpSessionRuntime.AcpSessionRuntimeStartResult,
+  appliesLegacyModels: boolean,
 ): OrchestrationV2ProviderCapabilities {
   const agent = started.initializeResult.agentCapabilities ?? {};
   const session = agent.sessionCapabilities;
@@ -649,7 +681,11 @@ function negotiatedCapabilities(
     ...base,
     sessions: {
       ...base.sessions,
-      supportsModelSwitchInSession: hasModelConfig,
+      supportsModelSwitchInSession:
+        hasModelConfig ||
+        (appliesLegacyModels &&
+          base.sessions.supportsModelSwitchInSession &&
+          (setup.models?.availableModels.length ?? 0) > 0),
     },
     threads: {
       ...base.threads,
@@ -2013,6 +2049,7 @@ export function makeAcpAdapterV2(
         ): AcpAdapterV2RuntimeInput => {
           const mcpContext = acpMcpContext(threadId, self);
           return {
+            threadId,
             cwd: input.runtimePolicy.cwd ?? process.cwd(),
             runtimePolicy: input.runtimePolicy,
             mcpServers: mcpContext.servers,
@@ -4607,10 +4644,7 @@ export function makeAcpAdapterV2(
             nativeRequestId,
           });
           const decision = yield* Deferred.make<ProviderApprovalDecision>();
-          const nativeResponseAcknowledgement = yield* Deferred.make<
-            void,
-            EffectAcpErrors.AcpError
-          >();
+          const nativeResponseAcknowledgement = yield* Deferred.make<void, EffectAcpErrors.AcpError>();
           yield* registerNativeResponseAcknowledgement(
             generation,
             transportRequestId,
@@ -4729,10 +4763,10 @@ export function makeAcpAdapterV2(
             nativeRequestId: request.nativeRequestId,
           });
           const answers = yield* Deferred.make<ProviderUserInputAnswers | null>();
-          const nativeResponseAcknowledgement = yield* Deferred.make<
-            void,
-            EffectAcpErrors.AcpError
-          >();
+          const existingAcknowledgement = (yield* Ref.get(nativeResponseAcknowledgements)).get(transportRequestId);
+          const nativeResponseAcknowledgement = existingAcknowledgement?.generation === generation
+            ? existingAcknowledgement.acknowledgement
+            : yield* Deferred.make<void, EffectAcpErrors.AcpError>();
           yield* registerNativeResponseAcknowledgement(
             generation,
             transportRequestId,
@@ -4843,7 +4877,7 @@ export function makeAcpAdapterV2(
 
         const requestUserInputWithAdmission = (
           generation: number,
-          request: Effect.Effect<AcpAdapterV2UserInputRequest>,
+          request: Effect.Effect<AcpAdapterV2UserInputRequest, EffectAcpErrors.AcpError>,
           transportRequestId: string,
         ) =>
           runRuntimeCallbackAtGeneration(
@@ -5325,7 +5359,10 @@ export function makeAcpAdapterV2(
                   );
             if (notification.update.sessionUpdate === "available_commands_update") {
               yield* (
-                flavor.onAvailableCommandsUpdate?.(notification.update.availableCommands) ??
+                flavor.onAvailableCommandsUpdate?.(
+                  notification.update.availableCommands,
+                  input.runtimePolicy.cwd ?? process.cwd(),
+                ) ??
                   Effect.void
               );
             }
@@ -5499,6 +5536,19 @@ export function makeAcpAdapterV2(
           yield* targetRuntime.handleRequestPermission((params, requestContext) =>
             Effect.gen(function* () {
               const transportRequestId = requestContext.requestId;
+              const preparationContext = flavor.preparePermissionRequest === undefined
+                ? undefined
+                : yield* runRuntimeCallbackAtGeneration(handlerGeneration, activeContext);
+              if (preparationContext !== undefined && Option.isNone(preparationContext)) {
+                return yield* Effect.never;
+              }
+              const prepared = preparationContext !== undefined && Option.isSome(preparationContext)
+                ? yield* flavor.preparePermissionRequest!({
+                    request: params,
+                    threadId: preparationContext.value.input.threadId,
+                    runtimePolicy: preparationContext.value.input.runtimePolicy,
+                  })
+                : undefined;
               const permissionQuestion = flavor.extractPermissionQuestion?.(params);
               if (permissionQuestion !== undefined) {
                 const userInput = yield* requestUserInputWithAdmission(
@@ -5523,6 +5573,18 @@ export function makeAcpAdapterV2(
                 handlerGeneration,
                 Effect.gen(function* () {
                   const context = yield* activeContext;
+                  if (preparationContext !== undefined && Option.isSome(preparationContext)) {
+                    if (
+                      context !== preparationContext.value ||
+                      context.interrupted || context.finalized ||
+                      context.nativeThreadId !== params.sessionId
+                    ) {
+                      return { _tag: "Immediate" as const, response: { outcome: { outcome: "cancelled" } } as const };
+                    }
+                    if (prepared?.proposedPlanMarkdown !== undefined) {
+                      yield* captureProposedPlan({ planMarkdown: prepared.proposedPlanMarkdown });
+                    }
+                  }
                   const disposition = (flavor.permissionDisposition ?? acpPermissionDisposition)(
                     context.input.runtimePolicy,
                     params,
@@ -5721,6 +5783,8 @@ export function makeAcpAdapterV2(
               const properties = unknownRecord(requestedSchema?.properties) ?? {};
               const elicitationScopeId =
                 "sessionId" in params ? params.sessionId : `request:${params.requestId}`;
+              let formContext: ActiveAcpTurn | undefined;
+              let preparedForm: ReturnType<NonNullable<AcpAdapterV2Flavor["prepareFormElicitation"]>> | undefined;
               const questions = Object.entries(properties).map(
                 ([id, property], index): OrchestrationV2UserInputQuestion => {
                   const record = unknownRecord(property);
@@ -5752,16 +5816,47 @@ export function makeAcpAdapterV2(
                     (current) => current + 1,
                   );
                   const nativeRequestId = `${elicitationScopeId}:elicitation:${ordinal}`;
+                  if (flavor.prepareFormElicitation !== undefined) {
+                    formContext = yield* activeContext;
+                    if (
+                      formContext.interrupted || formContext.finalized ||
+                      ("sessionId" in params && params.sessionId !== formContext.nativeThreadId)
+                    ) {
+                      return yield* new EffectAcpErrors.AcpTransportError({
+                        detail: "ACP form request does not belong to the active turn",
+                        cause: undefined,
+                      });
+                    }
+                    if (flavor.acquireFormElicitation !== undefined) {
+                      yield* Effect.uninterruptible(Effect.gen(function* () {
+                        const release = yield* flavor.acquireFormElicitation!();
+                        const acknowledgement = yield* Deferred.make<void, EffectAcpErrors.AcpError>();
+                        yield* registerNativeResponseAcknowledgement(handlerGeneration, transportRequestId, acknowledgement);
+                        yield* Deferred.await(acknowledgement).pipe(
+                          Effect.ensuring(release),
+                          Effect.ignore,
+                          Effect.interruptible,
+                          Effect.forkIn(sessionScope),
+                        );
+                      }));
+                    }
+                    preparedForm = flavor.prepareFormElicitation({
+                      request: { mode: "form", message: params.message, requestedSchema: params.requestedSchema },
+                      nativeRequestId,
+                      threadId: formContext.input.threadId,
+                    });
+                  }
                   return {
                     nativeItemId: nativeRequestId,
                     nativeRequestId,
-                    questions,
+                    questions: preparedForm?.questions ?? questions,
                   };
                 }),
                 transportRequestId,
               );
-              const response =
-                userInput.answers === null
+              const response = preparedForm !== undefined
+                ? yield* preparedForm.respond(userInput.answers)
+                : userInput.answers === null
                   ? ({ action: "cancel" } as const)
                   : ({
                       action: "accept",
@@ -5770,8 +5865,17 @@ export function makeAcpAdapterV2(
                         new Set(Object.keys(properties)),
                       ),
                     } as const);
+              const checked = preparedForm === undefined
+                ? Option.some(response)
+                : yield* runRuntimeCallbackAtGeneration(handlerGeneration, Effect.gen(function* () {
+                    const current = yield* Ref.get(activeTurn);
+                    return current === formContext && current !== null && !current.interrupted && !current.finalized
+                      ? response
+                      : ({ action: "cancel" } as const);
+                  }));
+              if (Option.isNone(checked)) return yield* Effect.never;
               yield* userInput.acknowledgeNativeResponse;
-              return response;
+              return checked.value;
             }),
           );
           if (flavor.registerExtensions !== undefined) {
@@ -6055,6 +6159,7 @@ export function makeAcpAdapterV2(
               const failedMethod =
                 "method" in initialStart.failure ? initialStart.failure.method : undefined;
               if (
+                flavor.requireNativeSessionRestore === true ||
                 input.initialNativeThreadId === undefined ||
                 (failedMethod !== "session/load" && failedMethod !== "session/resume")
               ) {
@@ -6072,7 +6177,11 @@ export function makeAcpAdapterV2(
         yield* Ref.set(activeSessionId, started.sessionId);
         yield* Ref.set(activeSessionSetup, started);
         rememberTerminalEnvironment(started.sessionId, input.threadId);
-        const capabilities = negotiatedCapabilities(flavor.capabilities, started);
+        const capabilities = negotiatedCapabilities(
+          flavor.capabilities,
+          started,
+          flavor.applyModelSelection !== undefined,
+        );
         const canLoadSession = started.initializeResult.agentCapabilities?.loadSession === true;
         const canResumeSession =
           started.initializeResult.agentCapabilities?.sessionCapabilities?.resume != null;
@@ -6112,14 +6221,8 @@ export function makeAcpAdapterV2(
           runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
         ) {
           const requestedModel = flavor.resolveModelId?.(modelSelection) ?? modelSelection.model;
-          let appliedModel: string | undefined;
-          if (flavor.applyModelSelection !== undefined) {
-            appliedModel = yield* flavor.applyModelSelection({
-              runtime,
-              startResult,
-              modelSelection,
-            });
-          } else if (
+          if (
+            flavor.applyModelSelection === undefined &&
             requestedModel.length > 0 &&
             requestedModel !== "auto" &&
             requestedModel !== "default"
@@ -6131,29 +6234,6 @@ export function makeAcpAdapterV2(
             if (hasModelConfig) {
               yield* runtime.setModel(requestedModel);
             }
-          }
-          // Same-runtime switches compare against this stored setup, so keep
-          // its model metadata in sync with what the session now runs on;
-          // otherwise switching A -> B -> A would see the stale setup-time A
-          // and skip the final switch.
-          if (appliedModel !== undefined) {
-            const applied = appliedModel;
-            yield* Ref.update(activeSessionSetup, (setup) => {
-              if (setup === null) {
-                return setup;
-              }
-              const models = setup.sessionSetupResult.models;
-              if (models == null || models.currentModelId === applied) {
-                return setup;
-              }
-              return {
-                ...setup,
-                sessionSetupResult: {
-                  ...setup.sessionSetupResult,
-                  models: { ...models, currentModelId: applied },
-                },
-              };
-            });
           }
           const optionSelections = modelSelection.options ?? [];
           const configOptions = yield* runtime.getConfigOptions;
@@ -6218,9 +6298,6 @@ export function makeAcpAdapterV2(
             );
           }
           const policyMode = flavor.sessionModeForPolicy?.(runtimePolicy);
-          if (policyMode !== undefined) {
-            yield* runtime.setMode(policyMode);
-          }
           const modeState = yield* runtime.getModeState;
           // The synthetic mode selection is skipped rather than failed when the
           // agent no longer advertises it: mode sets are volatile across agent
@@ -6245,7 +6322,11 @@ export function makeAcpAdapterV2(
               option.type === "select" &&
               (option.category === "mode" || option.category === "collaboration_mode"),
           );
-          if (runtimePolicy.interactionMode === "plan") {
+          if (policyMode !== undefined) {
+            // A flavor with an authoritative policy mode owns its transition;
+            // generic build restoration must not cache an initial Plan mode.
+            yield* runtime.setMode(policyMode);
+          } else if (runtimePolicy.interactionMode === "plan") {
             if (!nativeBuildConfigurationBySessionId.has(startResult.sessionId)) {
               nativeBuildConfigurationBySessionId.set(startResult.sessionId, {
                 ...(effectiveModeState === undefined
@@ -6299,6 +6380,19 @@ export function makeAcpAdapterV2(
                 }
               }
               nativeBuildConfigurationBySessionId.delete(startResult.sessionId);
+            }
+          }
+          // Native MC stores models per mode, so apply the explicit model only
+          // after the incoming mode has loaded its saved/default selection.
+          if (flavor.applyModelSelection !== undefined) {
+            const applied = yield* flavor.applyModelSelection({ runtime, startResult, modelSelection });
+            if (applied !== undefined) {
+              yield* Ref.update(activeSessionSetup, (setup) => {
+                if (setup === null || setup.sessionSetupResult.models == null) return setup;
+                return { ...setup, sessionSetupResult: { ...setup.sessionSetupResult,
+                  models: { ...setup.sessionSetupResult.models, currentModelId: applied },
+                } };
+              });
             }
           }
           yield* (
