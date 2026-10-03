@@ -2,30 +2,7 @@ name: Publish AUR package
 
 # See packaging/aur/README.md.
 
-on:
-  workflow_call:
-    inputs:
-      release_tag:
-        required: true
-        type: string
-      pkgrel:
-        required: false
-        default: "1"
-        type: string
-    secrets:
-      AUR_SSH_PRIVATE_KEY:
-        required: true
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "Release tag to publish"
-        required: true
-        type: string
-      pkgrel:
-        description: "Arch package release override"
-        required: false
-        default: "1"
-        type: string
+on: []
 
 permissions:
   contents: read

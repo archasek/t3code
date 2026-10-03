@@ -15,9 +15,7 @@ name: Web Preview
 # `isHostedStaticApp` matches on origin, so branch-alias URLs will not
 # self-identify as the hosted app.
 
-on:
-  pull_request:
-    types: [labeled, synchronize, reopened]
+on: []
 
 permissions:
   contents: read
