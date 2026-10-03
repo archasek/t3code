@@ -20,8 +20,8 @@ function form(requestedSchema: unknown) {
 }
 
 describe("MastraCodeForm", () => {
-  it("rejects excess forms before answers and releases capacity idempotently", async () => {
-    await Effect.runPromise(Effect.gen(function* () {
+  it.effect("rejects excess forms before answers and releases capacity idempotently", () =>
+    Effect.gen(function* () {
       const leases = yield* Effect.all(Array.from({ length: 32 }, () => acquireMastraCodeFormAdmission()));
       try {
         const overload = yield* acquireMastraCodeFormAdmission().pipe(Effect.flip);
@@ -33,10 +33,10 @@ describe("MastraCodeForm", () => {
       } finally {
         yield* Effect.all(leases);
       }
-    }));
-  });
-  it.each([false, true])("queues concurrent validations and releases interrupted workers (%s)", async (interruptFirst) => {
-    await Effect.runPromise(Effect.gen(function* () {
+    }),
+  );
+  it.effect.each([false, true])("queues concurrent validations and releases interrupted workers (%s)", (interruptFirst) =>
+    Effect.gen(function* () {
       const entered = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       let spawned = 0;
@@ -89,10 +89,10 @@ describe("MastraCodeForm", () => {
       expect(spawned).toBe(32);
       expect(yield* validate("after-drain@example.com")).toBe(true);
       expect(spawned).toBe(33);
-    }));
-  });
-  it("waits for native string validation and cancels a rejected answer", async () => {
-    await Effect.runPromise(Effect.gen(function* () {
+    }),
+  );
+  it.effect("waits for native string validation and cancels a rejected answer", () =>
+    Effect.gen(function* () {
       const entered = yield* Deferred.make<void>();
       const verdict = yield* Deferred.make<boolean>();
       const prepared = prepareMastraCodeForm({
@@ -114,23 +114,23 @@ describe("MastraCodeForm", () => {
       expect(response.pollUnsafe()).toBeUndefined();
       yield* Deferred.succeed(verdict, false);
       expect(yield* Fiber.join(response)).toEqual({ action: "cancel" });
-    }));
-  });
-  it("preserves titled multi-select native values", async () => {
+    }),
+  );
+  it.effect("preserves titled multi-select native values", () => Effect.gen(function* () {
     const prepared = form({ properties: { choices: { type: "array", items: { anyOf: [
       { const: "a", title: "Same" }, { const: "b", title: "Same" },
     ] } } }, required: ["choices"] });
     expect(prepared.questions[0]?.options.map((option) => option.value)).toEqual(["a", "b"]);
-    expect(await Effect.runPromise(prepared.respond({ choices: ["b"] }))).toEqual({ action: "accept", content: { choices: ["b"] } });
-  });
-  it.each(["", "  padded  ", "first\nsecond"])("preserves the literal string %j", async (answer) => {
+    expect(yield* prepared.respond({ choices: ["b"] })).toEqual({ action: "accept", content: { choices: ["b"] } });
+  }));
+  it.effect.each(["", "  padded  ", "first\nsecond"])("preserves the literal string %j", (answer) => Effect.gen(function* () {
     const prepared = form({ type: "object", properties: { text: { type: "string" } }, required: ["text"] });
     expect(prepared.questions[0]?.answerFormat).toBe("raw-string");
-    expect(await Effect.runPromise(prepared.respond({ text: [answer] }))).toEqual({ action: "accept", content: { text: answer } });
-    expect(await Effect.runPromise(prepared.respond({}))).toEqual({ action: "cancel" });
-  });
+    expect(yield* prepared.respond({ text: [answer] })).toEqual({ action: "accept", content: { text: answer } });
+    expect(yield* prepared.respond({})).toEqual({ action: "cancel" });
+  }));
 
-  it("coerces scalars, preserves enum values and array choices", async () => {
+  it.effect("coerces scalars, preserves enum values and array choices", () => Effect.gen(function* () {
     const prepared = form({ type: "object", properties: {
       count: { type: "integer", minimum: 1, maximum: 3 },
       enabled: { type: "boolean" },
@@ -138,22 +138,22 @@ describe("MastraCodeForm", () => {
       tags: { type: "array", items: { type: "string", enum: ["x", "y"] }, minItems: 1 },
     }, required: ["count", "enabled", "choice", "tags"] });
     expect(prepared.questions.find((question) => question.id === "choice")?.options.map((option) => option.value)).toEqual(["a", "b"]);
-    expect(await Effect.runPromise(prepared.respond({ count: ["2"], enabled: ["true"], choice: ["b"], tags: ["x", "y"] }))).toEqual({ action: "accept", content: { count: 2, enabled: true, choice: "b", tags: ["x", "y"] } });
-    expect(await Effect.runPromise(prepared.respond({ count: ["4"], enabled: ["true"], choice: ["b"], tags: ["x"] }))).toEqual({ action: "cancel" });
-  });
+    expect(yield* prepared.respond({ count: ["2"], enabled: ["true"], choice: ["b"], tags: ["x", "y"] })).toEqual({ action: "accept", content: { count: 2, enabled: true, choice: "b", tags: ["x", "y"] } });
+    expect(yield* prepared.respond({ count: ["4"], enabled: ["true"], choice: ["b"], tags: ["x"] })).toEqual({ action: "cancel" });
+  }));
 
-  it("omits an optional value but rejects mixing its sentinel with choices", async () => {
+  it.effect("omits an optional value but rejects mixing its sentinel with choices", () => Effect.gen(function* () {
     const prepared = form({ type: "object", properties: { tags: { type: "array", items: { type: "string", enum: ["x"] } } } });
     const skip = prepared.questions[0]!.options.find((option) => option.label === "Leave unset")!.value!;
-    expect(await Effect.runPromise(prepared.respond({ tags: [skip] }))).toEqual({ action: "accept", content: {} });
-    expect(await Effect.runPromise(prepared.respond({ tags: [skip, "x"] }))).toEqual({ action: "cancel" });
-  });
+    expect(yield* prepared.respond({ tags: [skip] })).toEqual({ action: "accept", content: {} });
+    expect(yield* prepared.respond({ tags: [skip, "x"] })).toEqual({ action: "cancel" });
+  }));
 
-  it("requires confirmation for an empty form and fails closed on invalid schema", async () => {
+  it.effect("requires confirmation for an empty form and fails closed on invalid schema", () => Effect.gen(function* () {
     const prepared = form({ type: "object", properties: {} });
     const id = prepared.questions[0]!.id;
-    expect(await Effect.runPromise(prepared.respond({ [id]: ["accept"] }))).toEqual({ action: "accept", content: {} });
-    expect(await Effect.runPromise(prepared.respond({ [id]: ["decline"] }))).toEqual({ action: "decline" });
-    expect(await Effect.runPromise(form({ properties: { text: { type: "unsupported" } } }).respond({ [id]: ["accept"] }))).toEqual({ action: "cancel" });
-  });
+    expect(yield* prepared.respond({ [id]: ["accept"] })).toEqual({ action: "accept", content: {} });
+    expect(yield* prepared.respond({ [id]: ["decline"] })).toEqual({ action: "decline" });
+    expect(yield* form({ properties: { text: { type: "unsupported" } } }).respond({ [id]: ["accept"] })).toEqual({ action: "cancel" });
+  }));
 });

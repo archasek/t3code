@@ -618,8 +618,9 @@ function makeTurnInput(input: {
 }
 
 describe("AcpAdapterV2", () => {
-  for (const outcome of ["failed", "recovered", "completed", "cancelled"] as const) {
-    it.live(`projects Mistral retry notices and their ${outcome} outcome`, () =>
+  it.live.each(["failed", "recovered", "completed", "cancelled"] as const)(
+    "projects Mistral retry notices and their %s outcome",
+    (outcome) =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
         const instanceId = ProviderInstanceId.make(`vibe-retry-${outcome}`);
@@ -706,8 +707,7 @@ describe("AcpAdapterV2", () => {
           assert.equal(retries.at(-1)?.title, "Provider recovered");
         }
       }).pipe(Effect.provide(testLayer), Effect.scoped),
-    );
-  }
+  );
 
   it("preserves legacy ids and scopes v2 ids by provider instance", () => {
     const instanceId = ProviderInstanceId.make("acp-identity-test");
@@ -2162,9 +2162,12 @@ describe("AcpAdapterV2", () => {
     { timeout: 120_000 },
   );
 
-  for (const exposesModels of [true, false]) {
-  for (const initialPlan of [false, true]) {
-    it.live(`negotiates MC legacy model switching only with advertised models (${exposesModels}, initialPlan=${initialPlan})`, () =>
+    it.live.each([
+      { exposesModels: true, initialPlan: false },
+      { exposesModels: true, initialPlan: true },
+      { exposesModels: false, initialPlan: false },
+      { exposesModels: false, initialPlan: true },
+    ])("negotiates MC legacy model switching only with advertised models ($exposesModels, initialPlan=$initialPlan)", ({ exposesModels, initialPlan }) =>
       Effect.gen(function* () {
         const modelCalls: string[] = [];
         const promptModels: string[] = [];
@@ -2257,9 +2260,6 @@ describe("AcpAdapterV2", () => {
         }
       }).pipe(Effect.provide(testLayer), Effect.scoped),
     );
-  }
-  }
-
   it.effect("negotiates and executes optional native session forks through the ACP runtime", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -3264,8 +3264,9 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 
-  for (const model of ["grok-build", "composer-2"]) {
-    it.effect(`Grok configures the native session for ${model}`, () =>
+  it.effect.each(["grok-build", "composer-2"])(
+    "Grok configures the native session for %s",
+    (model) =>
       Effect.gen(function* () {
         const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         const fileSystem = yield* FileSystem.FileSystem;
@@ -3318,8 +3319,7 @@ describe("AcpAdapterV2", () => {
           model === "grok-build" ? 0 : 1,
         );
       }).pipe(Effect.provide(testLayer), Effect.scoped),
-    );
-  }
+  );
 
   it.live("Grok reapplies an explicit return to the session's setup-time model", () =>
     Effect.gen(function* () {
@@ -3823,10 +3823,10 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
-  for (const latePreparation of [false, true]) {
-  it.effect(latePreparation
-    ? "does not admit a late prepared plan after interrupting an ACP turn"
-    : "cancels pending permission requests while interrupting an ACP turn", () =>
+  it.effect.each([
+    { latePreparation: false, name: "cancels pending permission requests while interrupting an ACP turn" },
+    { latePreparation: true, name: "does not admit a late prepared plan after interrupting an ACP turn" },
+  ])("$name", ({ latePreparation }) =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -3975,8 +3975,6 @@ describe("AcpAdapterV2", () => {
       assert.equal(terminal.type, "turn.terminal");
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
-  }
-
   it.live("keeps hard teardown excluded until a permission response is enqueued", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -4298,10 +4296,10 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
-  for (const interruptDuringValidation of [false, true]) {
-  it.live(interruptDuringValidation
-    ? "drains admitted form validation before interrupting the turn"
-    : "carries elicitation request identity through the completed stdout write", () =>
+  it.live.each([
+    { interruptDuringValidation: false, name: "carries elicitation request identity through the completed stdout write" },
+    { interruptDuringValidation: true, name: "drains admitted form validation before interrupting the turn" },
+  ])("$name", ({ interruptDuringValidation }) =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -4449,8 +4447,6 @@ describe("AcpAdapterV2", () => {
       assert.deepEqual(actions, ["accept"]);
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
-  }
-
   it.live("auto-approves tagged MCP elicitations under full-access policy", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;

@@ -216,4 +216,3 @@ globalThis.fetch = async (input, init) => {
 await import(${JSON.stringify(`file://${cliPath}`)});
 `;
 }
-
