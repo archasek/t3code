@@ -18,8 +18,11 @@ name: Mobile EAS Production
 #      Store stays a manual App Store Connect step.
 #   2. OTA: publish a production-channel update for each platform where at
 #      least one finished production build matches the current native
-#      fingerprint. Old-version binaries with a matching fingerprint receive
-#      it too. When native drift means no binary could install the update,
+#      fingerprint. Older binaries of the same major version with a matching
+#      fingerprint receive it too; the major version is part of the
+#      fingerprint (apps/mobile/fingerprint.config.js), so a new major never
+#      reaches the previous major's store binaries over the air. When native
+#      drift means no binary could install the update,
 #      it is skipped and flagged in the job summary instead of published
 #      into the void.
 # workflow_dispatch remains as a manual override for both modes (e.g. to
@@ -27,59 +30,8 @@ name: Mobile EAS Production
 # Manual v2-preview builds keep the production app identity and disable OTA.
 # They auto-submit to TestFlight and the Google Play closed testing track v2.
 # Select the v2 branch when dispatching a preview build.
-on:
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: "build (+ auto-submit to TestFlight / Google Play) or update (OTA)"
-        required: true
-        type: choice
-        default: build
-        options:
-          - build
-          - update
-      profile:
-        description: "Store build profile (v2-preview: TestFlight + Play closed track v2; build only)"
-        required: true
-        type: choice
-        default: production
-        options:
-          - production
-          - v2-preview
-      platform:
-        description: "Target platform"
-        required: true
-        type: choice
-        default: all
-        options:
-          - ios
-          - android
-          - all
-      version:
-        description: "Optional build version override (blank uses app.config.ts; an override is committed before building)"
-        required: false
-        type: string
-      message:
-        description: "OTA update message (mode=update only)"
-        required: false
-        type: string
-  push:
-    branches: [main]
-    paths:
-      - apps/mobile/**
-      - packages/client-runtime/**
-      - packages/contracts/**
-      - packages/shared/**
-      - assets/**
-      - scripts/**
-      - patches/**
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - .github/workflows/mobile-eas-production.yml
+on: []
 
-# Serialize runs so OTAs publish in merge order. GitHub keeps at most one
-# queued run per group, so a burst of merges collapses into one run of the
-# newest commit — intermediate commits don't need their own OTA.
 concurrency:
   group: mobile-eas-production
   cancel-in-progress: false

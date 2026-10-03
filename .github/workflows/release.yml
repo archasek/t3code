@@ -1,36 +1,7 @@
 name: Release
 
-on:
-  push:
-    tags:
-      - "v*.*.*"
-      - "!v*-nightly.*"
-      - "!v*-preview.*"
-  schedule:
-    # Avoid minute zero, when GitHub scheduled jobs are busiest.
-    - cron: "8,38 * * * *"
-  workflow_dispatch:
-    inputs:
-      channel:
-        description: "Release channel"
-        required: false
-        default: preview
-        type: choice
-        options:
-          - preview
-          - stable
-          - nightly
-      version:
-        description: "Stable version override (for example 1.2.3). Defaults to the version the latest nightly previewed."
-        required: false
-        type: string
+on: []
 
-# Serialize nightlies (scheduled and manual) so overlapping runs cannot build
-# the same commit twice or publish out of order. Stable tag releases get their
-# own group so a nightly never blocks them. Running publishers are never
-# canceled, and queue: max keeps every pending run instead of the default
-# newest-wins single slot, so a queued stable tag can never be silently
-# dropped. Automatic nightlies recheck the release gap after leaving the queue.
 concurrency:
   group: release-${{ (github.event_name == 'schedule' || inputs.channel == 'nightly' || inputs.channel == 'preview') && 'nightly' || 'stable' }}
   cancel-in-progress: false

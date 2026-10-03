@@ -1,9 +1,6 @@
 name: Thread Transfer Report
 
-on:
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
+on: []
 
 permissions:
   actions: read

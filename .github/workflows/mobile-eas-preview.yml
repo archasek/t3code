@@ -1,8 +1,6 @@
 name: Mobile EAS Preview
 
-on:
-  pull_request:
-    types: [opened, reopened, synchronize, labeled]
+on: []
 
 jobs:
   preview:

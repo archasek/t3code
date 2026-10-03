@@ -1,10 +1,6 @@
 name: CI
 
-on:
-  pull_request:
-  push:
-    branches:
-      - main
+on: []
 
 permissions:
   contents: read
@@ -487,6 +483,7 @@ jobs:
         test,
         test_web,
         test_server,
+        transfer-report,
         rust,
         mobile_native_changes,
         mobile_native_static_analysis,
