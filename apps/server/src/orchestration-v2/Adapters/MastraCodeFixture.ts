@@ -1,4 +1,14 @@
-const fixtureMarkers = ["ALLOW", "REJECT", "ASK", "PLAN", "INTERRUPT", "RESUME", "CONCURRENT_A", "CONCURRENT_B"] as const;
+const fixtureMarkers = [
+  "ASK_SOCKET",
+  "ALLOW",
+  "REJECT",
+  "ASK",
+  "PLAN",
+  "INTERRUPT",
+  "RESUME",
+  "CONCURRENT_A",
+  "CONCURRENT_B",
+] as const;
 
 export function createFetchWrapper(cliPath: string): string {
   return `#!/usr/bin/env node
@@ -68,6 +78,7 @@ async function waitForControl(filePath, signal) {
 }
 
 const calls = new Map();
+let socketAskCallId;
 let responseSequence = 0;
 function responseEnvelope(sequence, status, output, completed = false) {
   return {
@@ -126,7 +137,7 @@ function responseForText(text) {
 
 function responseForTool(marker) {
   const sequence = ++responseSequence;
-  const toolCall = marker === 'ASK'
+  const toolCall = marker === 'ASK' || marker === 'ASK_SOCKET'
     ? { name: 'ask_user', arguments: { question: 'Choose a test color.', options: [{ label: 'Blue' }, { label: 'Green' }], selectionMode: 'single_select' } }
     : marker === 'PLAN'
     ? { name: 'submit_plan', arguments: { path: join(process.env.MASTRA_PLANS_DIR, 'fixture-plan.md') } }
@@ -134,6 +145,7 @@ function responseForTool(marker) {
   const argumentsJson = JSON.stringify(toolCall.arguments);
   const item = { id: 'fc_' + sequence, type: 'function_call', call_id: 'call_' + sequence, name: toolCall.name, arguments: '', status: 'in_progress' };
   const completedItem = { ...item, arguments: argumentsJson, status: 'completed' };
+  if (marker === 'ASK_SOCKET') socketAskCallId = item.call_id;
   const events = [
     { type: 'response.created', response: responseEnvelope(sequence, 'in_progress', []) },
     { type: 'response.output_item.added', output_index: 0, item },
@@ -204,7 +216,13 @@ globalThis.fetch = async (input, init) => {
   if (marker === 'RESUME') return responseForText('Resumed fixture completed.');
   const count = (calls.get(marker) ?? 0) + 1;
   calls.set(marker, count);
-  if ((marker === 'ALLOW' || marker === 'REJECT' || marker === 'ASK' || marker === 'PLAN') && count === 1) {
+  if (marker === 'ASK_SOCKET' && count > 1) {
+    if (count > 3) throw new Error('Unexpected repeated native ASK continuation');
+    const outputs = payload.input.filter(item => item.type === 'function_call_output' && item.call_id === socketAskCallId);
+    if (!socketAskCallId || outputs.length !== 1) throw new Error('Expected one matching native ASK tool result');
+    await writeFile(join(fixtureRoot, 'socket-ask-continuation-' + count + '.json'), JSON.stringify({ callId: socketAskCallId, outputs }), { mode: 0o600, flag: 'wx' });
+  }
+  if ((marker === 'ALLOW' || marker === 'REJECT' || marker === 'ASK' || marker === 'ASK_SOCKET' || marker === 'PLAN') && count === 1) {
     if (marker === 'PLAN') {
       await writeFile(join(process.env.MASTRA_PLANS_DIR, 'fixture-plan.md'), '# Native fixture plan\\n\\nPreserve the existing conversation.\\n', { mode: 0o600 });
     }

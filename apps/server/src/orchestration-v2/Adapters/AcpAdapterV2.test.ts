@@ -101,7 +101,10 @@ import { makeGrokAdapterV2 } from "./GrokAdapterV2.ts";
 import { makeMastraCodeAdapterV2 } from "./MastraCodeAdapterV2.ts";
 import { createFetchWrapper } from "./MastraCodeFixture.ts";
 import { applyMastraCodeModelSelection } from "../../provider/MastraCodeModelSelection.ts";
-import { acquireMastraCodeFormAdmission, validateMastraCodeStringConstraints } from "../../provider/MastraCodeElicitationValidation.ts";
+import {
+  acquireMastraCodeFormAdmission,
+  validateMastraCodeStringConstraints,
+} from "../../provider/MastraCodeElicitationValidation.ts";
 import { prepareMastraCodeForm } from "../../provider/MastraCodeForm.ts";
 import * as Orchestrator from "../Orchestrator.ts";
 import * as EffectWorker from "../EffectWorker.ts";
@@ -1479,44 +1482,52 @@ describe("AcpAdapterV2", () => {
       }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
-  it.live("rejects failed required native restore without creating a replacement conversation", () =>
-    Effect.gen(function* () {
-      const path = yield* Path.Path;
-      const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
-      const instanceId = ProviderInstanceId.make("mc-required-restore");
-      const adapter = makeAcpAdapterV2({
-        crypto: yield* Crypto.Crypto,
-        instanceId,
-        fileSystem: yield* FileSystem.FileSystem,
-        idAllocator: yield* IdAllocator.IdAllocatorV2,
-        serverConfig: yield* ServerConfig.ServerConfig,
-        selfInvocation: yield* resolveSelfInvocation(),
-        flavor: {
-          driver: ACP_TEST_DRIVER,
-          capabilities: AcpProviderCapabilitiesV2,
-          requireNativeSessionRestore: true,
-          makeRuntime: makeMockRuntime({
-            childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
-            mockAgentPath: yield* path.fromFileUrl(new URL("../../../scripts/acp-mock-agent.ts", import.meta.url)),
-            protocolEvents,
-            environment: { T3_ACP_FAIL_LOAD_SESSION: "1" },
-          }),
-        },
-      });
-      const error = yield* adapter.openSession({
-        threadId: ThreadId.make("mc-required-restore"),
-        providerSessionId: ProviderSessionId.make("mc-required-restore"),
-        modelSelection: { instanceId, model: "default" },
-        runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
-          runtimeMode: "full-access", interactionMode: "default", cwd: process.cwd(),
-        }),
-        initialNativeThreadId: "stale-session",
-      }).pipe(Effect.flip);
-      assert.equal(error._tag, "ProviderAdapterOpenSessionError");
-      const methods = yield* pollProtocolMethods(protocolEvents);
-      assert.equal(methods.filter((method) => method === "session/resume").length, 1);
-      assert.notInclude(methods, "session/new");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  it.live(
+    "rejects failed required native restore without creating a replacement conversation",
+    () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
+        const instanceId = ProviderInstanceId.make("mc-required-restore");
+        const adapter = makeAcpAdapterV2({
+          crypto: yield* Crypto.Crypto,
+          instanceId,
+          fileSystem: yield* FileSystem.FileSystem,
+          idAllocator: yield* IdAllocator.IdAllocatorV2,
+          serverConfig: yield* ServerConfig.ServerConfig,
+          selfInvocation: yield* resolveSelfInvocation(),
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            requireNativeSessionRestore: true,
+            makeRuntime: makeMockRuntime({
+              childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+              mockAgentPath: yield* path.fromFileUrl(
+                new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+              ),
+              protocolEvents,
+              environment: { T3_ACP_FAIL_LOAD_SESSION: "1" },
+            }),
+          },
+        });
+        const error = yield* adapter
+          .openSession({
+            threadId: ThreadId.make("mc-required-restore"),
+            providerSessionId: ProviderSessionId.make("mc-required-restore"),
+            modelSelection: { instanceId, model: "default" },
+            runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: process.cwd(),
+            }),
+            initialNativeThreadId: "stale-session",
+          })
+          .pipe(Effect.flip);
+        assert.equal(error._tag, "ProviderAdapterOpenSessionError");
+        const methods = yield* pollProtocolMethods(protocolEvents);
+        assert.equal(methods.filter((method) => method === "session/resume").length, 1);
+        assert.notInclude(methods, "session/new");
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
   it.live("preserves new-session fallback when an eager ACP session load is stale", () =>
@@ -1744,10 +1755,10 @@ describe("AcpAdapterV2", () => {
       );
       assert.equal(runtimeOrdinalSeen, 2);
       assert.lengthOf(runtimeInputs, 2);
-      assert.deepEqual(runtimeInputs.map((runtimeInput) => runtimeInput.threadId), [
-        threadId,
-        threadId,
-      ]);
+      assert.deepEqual(
+        runtimeInputs.map((runtimeInput) => runtimeInput.threadId),
+        [threadId, threadId],
+      );
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
@@ -1971,203 +1982,613 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
-  it.live.skipIf(!process.env.T3_MASTRA_CODE_CLI && process.env.T3_MASTRA_CODE_REQUIRE_INTEGRATION !== "1")(
+  it.live.skipIf(
+    !process.env.T3_MASTRA_CODE_CLI && process.env.T3_MASTRA_CODE_REQUIRE_INTEGRATION !== "1",
+  )(
     "runs real MC through V2 and restores its native conversation offline",
-    () => Effect.gen(function* () {
-      const cliPath = process.env.T3_MASTRA_CODE_CLI;
-      if (!cliPath) throw new Error("T3_MASTRA_CODE_CLI is required");
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-mc-v2-real-" });
-      const appDataDirectory = path.join(root, "app");
-      const home = path.join(root, "home");
-      const workspace = path.join(root, "workspace");
-      const fixture = path.join(root, "fixture");
-      const waitForFixtureFile = (name: string) => Effect.scoped(Effect.gen(function* () {
-        const target = path.join(fixture, name);
-        if (yield* fs.exists(target)) return;
-        const watcher = yield* fs.watch(fixture).pipe(
-          Stream.filterEffect(() => fs.exists(target)), Stream.take(1), Stream.runDrain,
-          Effect.forkScoped({ startImmediately: true }),
+    () =>
+      Effect.gen(function* () {
+        const cliPath = process.env.T3_MASTRA_CODE_CLI;
+        if (!cliPath) throw new Error("T3_MASTRA_CODE_CLI is required");
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-mc-v2-real-" });
+        const appDataDirectory = path.join(root, "app");
+        const home = path.join(root, "home");
+        const workspace = path.join(root, "workspace");
+        const fixture = path.join(root, "fixture");
+        const waitForFixtureFile = (name: string) =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const target = path.join(fixture, name);
+              if (yield* fs.exists(target)) return;
+              const watcher = yield* fs.watch(fixture).pipe(
+                Stream.filterEffect(() => fs.exists(target)),
+                Stream.take(1),
+                Stream.runDrain,
+                Effect.forkScoped({ startImmediately: true }),
+              );
+              if (yield* fs.exists(target)) return;
+              yield* Fiber.join(watcher);
+            }),
+          ).pipe(Effect.timeout("20 seconds"));
+        for (const directory of [appDataDirectory, home, workspace, fixture]) {
+          yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 });
+        }
+        yield* fs.writeFileString(
+          path.join(appDataDirectory, "auth.json"),
+          JSON.stringify({
+            "openai-codex": {
+              type: "oauth",
+              access: "test-only-synthetic-access-token",
+              refresh: "test-only-synthetic-refresh-token",
+              expires: 4_102_444_800_000,
+              accountId: "test-only-account",
+            },
+          }),
         );
-        if (yield* fs.exists(target)) return;
-        yield* Fiber.join(watcher);
-      })).pipe(Effect.timeout("20 seconds"));
-      for (const directory of [appDataDirectory, home, workspace, fixture]) {
-        yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 });
-      }
-      yield* fs.writeFileString(path.join(appDataDirectory, "auth.json"), JSON.stringify({
-        "openai-codex": { type: "oauth", access: "test-only-synthetic-access-token",
-          refresh: "test-only-synthetic-refresh-token", expires: 4_102_444_800_000, accountId: "test-only-account" },
-      }));
-      yield* fs.chmod(path.join(appDataDirectory, "auth.json"), 0o600);
-      yield* fs.writeFileString(path.join(appDataDirectory, "settings.json"), JSON.stringify({
-        onboarding: { quietModePreferenceSelected: true }, observability: { resources: {}, localTracing: true },
-      }));
-      const wrapper = path.join(root, "wrapper.mjs");
-      yield* fs.writeFileString(wrapper, createFetchWrapper(cliPath));
-      const launcher = path.join(root, "mastracode");
-      yield* fs.writeFileString(launcher, `#!${process.execPath}\nrequire('node:child_process').execFileSync(process.execPath, [${JSON.stringify(wrapper)}, ...process.argv.slice(2)], {stdio:'inherit'});\n`);
-      yield* fs.chmod(launcher, 0o700);
-      const instanceId = ProviderInstanceId.make("mc-real-v2");
-      const adapter = makeMastraCodeAdapterV2({
-        instanceId, appDataDirectory, settings: { enabled: true, binaryPath: launcher, customModels: [] }, path,
-        platform: yield* HostProcessPlatform,
-        environment: { PATH: process.env.PATH, HOME: home, CODEX_HOME: path.join(home, ".codex"),
-          MASTRA_APP_DATA_DIR: appDataDirectory, T3_MASTRA_CODE_FIXTURE_DIR: fixture,
-          XDG_CONFIG_HOME: path.join(home, ".config"), XDG_DATA_HOME: path.join(home, ".local/share"),
-          XDG_CACHE_HOME: path.join(home, ".cache"), TMPDIR: root },
-        crypto: yield* Crypto.Crypto, fileSystem: fs,
-        childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
-        idAllocator: yield* IdAllocator.IdAllocatorV2, serverConfig: yield* ServerConfig.ServerConfig,
-        selfInvocation: yield* resolveSelfInvocation(),
-      });
-      const threadId = ThreadId.make("mc-real-v2");
-      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({ runtimeMode: "approval-required", interactionMode: "default", cwd: workspace });
-      const modelSelection = { instanceId, model: "default" } as const;
-      const firstScope = yield* Scope.make();
-      yield* Effect.addFinalizer(() => Scope.close(firstScope, Exit.void));
-      const first = yield* adapter.openSession({ threadId, providerSessionId: ProviderSessionId.make("mc-real-first"), modelSelection, runtimePolicy }).pipe(Effect.provideService(Scope.Scope, firstScope));
-      const providerThread = yield* first.ensureThread({ threadId, modelSelection, runtimePolicy });
-      yield* first.startTurn(makeTurnInput({ threadId, providerThread, instanceId, runtimePolicy,
-        now: yield* DateTime.now, messageText: "T3-MC-FIXTURE-RESUME" }));
-      const terminal = yield* first.events.pipe(Stream.filter((event) => event.type === "turn.terminal"), Stream.runHead);
-      assert.isTrue(Option.isSome(terminal));
-      const firstTerminal = Option.getOrThrow(terminal);
-      assert.equal(firstTerminal.type, "turn.terminal");
-      if (firstTerminal.type === "turn.terminal") assert.equal(firstTerminal.status, "completed");
-      yield* Scope.close(firstScope, Exit.void);
-      const persistedNativeId = providerThread.nativeThreadRef?.nativeId;
-      if (typeof persistedNativeId !== "string") return yield* Effect.die("MC did not return a native conversation ID");
-      const restored = yield* adapter.openSession({ threadId, providerSessionId: ProviderSessionId.make("mc-real-restored"),
-        modelSelection, runtimePolicy, initialNativeThreadId: persistedNativeId });
-      const binding = yield* restored.ensureThread({ threadId, modelSelection, runtimePolicy });
-      assert.equal(binding.nativeThreadRef?.nativeId, providerThread.nativeThreadRef?.nativeId);
-      yield* restored.startTurn(makeTurnInput({ threadId, providerThread: binding, instanceId, runtimePolicy,
-        now: yield* DateTime.now, ordinal: 2, messageText: "T3-MC-FIXTURE-RESUME" }));
-      const resumedTerminal = yield* restored.events.pipe(Stream.filter((event) => event.type === "turn.terminal"), Stream.runHead);
-      assert.isTrue(Option.isSome(resumedTerminal));
-      const lastTerminal = Option.getOrThrow(resumedTerminal);
-      assert.equal(lastTerminal.type, "turn.terminal");
-      if (lastTerminal.type === "turn.terminal") assert.equal(lastTerminal.status, "completed");
-      for (const [index, marker] of ["ALLOW", "REJECT", "ASK", "PLAN"].entries()) {
-        const turnPolicy = marker === "PLAN"
-          ? ProviderAdapterV2RuntimePolicy.make({ runtimeMode: "full-access", interactionMode: "plan", cwd: workspace })
-          : runtimePolicy;
-        yield* restored.startTurn(makeTurnInput({ threadId, providerThread: binding, instanceId, runtimePolicy: turnPolicy,
-          now: yield* DateTime.now, ordinal: index + 3, messageText: `T3-MC-FIXTURE-${marker}` }));
-        const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
-        const listener = yield* restored.events.pipe(Stream.runForEach((event) => Queue.offer(events, event)), Effect.forkScoped);
-        let permissions = 0;
-        let questions = 0;
-        let plans = 0;
-        let completed = false;
-        while (!completed) {
-          const event = yield* Queue.take(events);
-          if (event.type === "plan.updated" && event.plan.kind === "proposed_plan") {
-            plans += 1;
-            assert.equal(marker, "PLAN");
-            assert.equal(event.plan.markdown, "# Native fixture plan\n\nPreserve the existing conversation.");
+        yield* fs.chmod(path.join(appDataDirectory, "auth.json"), 0o600);
+        yield* fs.writeFileString(
+          path.join(appDataDirectory, "settings.json"),
+          JSON.stringify({
+            onboarding: { quietModePreferenceSelected: true },
+            observability: { resources: {}, localTracing: true },
+          }),
+        );
+        const wrapper = path.join(root, "wrapper.mjs");
+        yield* fs.writeFileString(wrapper, createFetchWrapper(cliPath));
+        const launcher = path.join(root, "mastracode");
+        yield* fs.writeFileString(
+          launcher,
+          `#!${process.execPath}\nrequire('node:child_process').execFileSync(process.execPath, [${JSON.stringify(wrapper)}, ...process.argv.slice(2)], {stdio:'inherit'});\n`,
+        );
+        yield* fs.chmod(launcher, 0o700);
+        const instanceId = ProviderInstanceId.make("mc-real-v2");
+        const adapter = makeMastraCodeAdapterV2({
+          instanceId,
+          appDataDirectory,
+          settings: { enabled: true, binaryPath: launcher, customModels: [] },
+          path,
+          platform: yield* HostProcessPlatform,
+          environment: {
+            PATH: process.env.PATH,
+            HOME: home,
+            CODEX_HOME: path.join(home, ".codex"),
+            MASTRA_APP_DATA_DIR: appDataDirectory,
+            T3_MASTRA_CODE_FIXTURE_DIR: fixture,
+            XDG_CONFIG_HOME: path.join(home, ".config"),
+            XDG_DATA_HOME: path.join(home, ".local/share"),
+            XDG_CACHE_HOME: path.join(home, ".cache"),
+            TMPDIR: root,
+          },
+          crypto: yield* Crypto.Crypto,
+          fileSystem: fs,
+          childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+          idAllocator: yield* IdAllocator.IdAllocatorV2,
+          serverConfig: yield* ServerConfig.ServerConfig,
+          selfInvocation: yield* resolveSelfInvocation(),
+        });
+        const threadId = ThreadId.make("mc-real-v2");
+        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: workspace,
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+        const firstScope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(firstScope, Exit.void));
+        const first = yield* adapter
+          .openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make("mc-real-first"),
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.provideService(Scope.Scope, firstScope));
+        const providerThread = yield* first.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* first.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            messageText: "T3-MC-FIXTURE-RESUME",
+          }),
+        );
+        const terminal = yield* first.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+        assert.isTrue(Option.isSome(terminal));
+        const firstTerminal = Option.getOrThrow(terminal);
+        assert.equal(firstTerminal.type, "turn.terminal");
+        if (firstTerminal.type === "turn.terminal") assert.equal(firstTerminal.status, "completed");
+        yield* Scope.close(firstScope, Exit.void);
+        const persistedNativeId = providerThread.nativeThreadRef?.nativeId;
+        if (typeof persistedNativeId !== "string")
+          return yield* Effect.die("MC did not return a native conversation ID");
+        const restored = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("mc-real-restored"),
+          modelSelection,
+          runtimePolicy,
+          initialNativeThreadId: persistedNativeId,
+        });
+        const binding = yield* restored.ensureThread({ threadId, modelSelection, runtimePolicy });
+        assert.equal(binding.nativeThreadRef?.nativeId, providerThread.nativeThreadRef?.nativeId);
+        yield* restored.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread: binding,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 2,
+            messageText: "T3-MC-FIXTURE-RESUME",
+          }),
+        );
+        const resumedTerminal = yield* restored.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+        assert.isTrue(Option.isSome(resumedTerminal));
+        const lastTerminal = Option.getOrThrow(resumedTerminal);
+        assert.equal(lastTerminal.type, "turn.terminal");
+        if (lastTerminal.type === "turn.terminal") assert.equal(lastTerminal.status, "completed");
+        for (const [index, marker] of ["ALLOW", "REJECT", "ASK", "PLAN"].entries()) {
+          const turnPolicy =
+            marker === "PLAN"
+              ? ProviderAdapterV2RuntimePolicy.make({
+                  runtimeMode: "full-access",
+                  interactionMode: "plan",
+                  cwd: workspace,
+                })
+              : runtimePolicy;
+          yield* restored.startTurn(
+            makeTurnInput({
+              threadId,
+              providerThread: binding,
+              instanceId,
+              runtimePolicy: turnPolicy,
+              now: yield* DateTime.now,
+              ordinal: index + 3,
+              messageText: `T3-MC-FIXTURE-${marker}`,
+            }),
+          );
+          const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
+          const listener = yield* restored.events.pipe(
+            Stream.runForEach((event) => Queue.offer(events, event)),
+            Effect.forkScoped,
+          );
+          let permissions = 0;
+          let questions = 0;
+          let plans = 0;
+          let completed = false;
+          while (!completed) {
+            const event = yield* Queue.take(events);
+            if (event.type === "plan.updated" && event.plan.kind === "proposed_plan") {
+              plans += 1;
+              assert.equal(marker, "PLAN");
+              assert.equal(
+                event.plan.markdown,
+                "# Native fixture plan\n\nPreserve the existing conversation.",
+              );
+            }
+            if (
+              event.type === "runtime_request.updated" &&
+              event.runtimeRequest.status === "pending" &&
+              event.runtimeRequest.kind !== "user_input"
+            ) {
+              permissions += 1;
+              if (marker === "PLAN") assert.isAtLeast(plans, 1);
+              yield* restored.respondToRuntimeRequest({
+                requestId: event.runtimeRequest.id,
+                decision: marker === "REJECT" ? "decline" : "accept",
+              });
+            }
+            if (
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "user_input_request" &&
+              event.turnItem.status === "waiting"
+            ) {
+              questions += 1;
+              assert.equal(marker, "ASK");
+              assert.equal(event.turnItem.questions.length, 1);
+              const response = {
+                requestId: event.turnItem.requestId,
+                answers: { [event.turnItem.questions[0]!.id]: ["Blue"] },
+              };
+              const racedAnswers = yield* Effect.all(
+                [
+                  restored.respondToRuntimeRequest(response).pipe(Effect.exit),
+                  restored.respondToRuntimeRequest(response).pipe(Effect.exit),
+                ],
+                { concurrency: 2 },
+              );
+              assert.equal(racedAnswers.filter(Exit.isSuccess).length, 1);
+              assert.equal(racedAnswers.filter(Exit.isFailure).length, 1);
+            }
+            if (event.type === "turn.terminal") {
+              assert.equal(event.status, "completed");
+              completed = true;
+            }
           }
-          if (event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending" && event.runtimeRequest.kind !== "user_input") {
-            permissions += 1;
-            if (marker === "PLAN") assert.isAtLeast(plans, 1);
-            yield* restored.respondToRuntimeRequest({ requestId: event.runtimeRequest.id,
-              decision: marker === "REJECT" ? "decline" : "accept" });
-          }
-          if (event.type === "turn_item.updated" && event.turnItem.type === "user_input_request" && event.turnItem.status === "waiting") {
-            questions += 1;
-            assert.equal(marker, "ASK");
-            assert.equal(event.turnItem.questions.length, 1);
-            const response = { requestId: event.turnItem.requestId,
-              answers: { [event.turnItem.questions[0]!.id]: ["Blue"] } };
-            const racedAnswers = yield* Effect.all([
-              restored.respondToRuntimeRequest(response).pipe(Effect.exit),
-              restored.respondToRuntimeRequest(response).pipe(Effect.exit),
-            ], { concurrency: 2 });
-            assert.equal(racedAnswers.filter(Exit.isSuccess).length, 1);
-            assert.equal(racedAnswers.filter(Exit.isFailure).length, 1);
-          }
-          if (event.type === "turn.terminal") {
-            assert.equal(event.status, "completed");
-            completed = true;
+          yield* Fiber.interrupt(listener);
+          // Native MC asks once to run submit_plan and once for its suspension.
+          // Both must remain explicit even when the T3 policy is full-access.
+          assert.equal(permissions, marker === "ALLOW" || marker === "PLAN" ? 2 : 1);
+          assert.equal(questions, marker === "ASK" ? 1 : 0);
+          assert.equal(plans, marker === "PLAN" ? 1 : 0);
+        }
+        yield* restored.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread: binding,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 7,
+            messageText: "T3-MC-FIXTURE-INTERRUPT",
+          }),
+        );
+        const runningEvent = Option.getOrThrow(
+          yield* restored.events.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+            ),
+            Stream.runHead,
+          ),
+        );
+        if (runningEvent.type !== "provider_turn.updated")
+          return yield* Effect.die("Expected running provider turn");
+        yield* waitForFixtureFile("request-INTERRUPT.started");
+        yield* restored.interruptTurn({
+          providerThread: binding,
+          providerTurnId: runningEvent.providerTurn.id,
+        });
+        const cancelled = Option.getOrThrow(
+          yield* restored.events.pipe(
+            Stream.filter((event) => event.type === "turn.terminal"),
+            Stream.runHead,
+          ),
+        );
+        if (cancelled.type !== "turn.terminal")
+          return yield* Effect.die("Expected cancellation terminal");
+        assert.equal(cancelled.status, "interrupted");
+        yield* waitForFixtureFile("interrupt-aborted");
+        yield* restored.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread: binding,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 8,
+            messageText: "T3-MC-FIXTURE-RESUME",
+          }),
+        );
+        const afterCancel = Option.getOrThrow(
+          yield* restored.events.pipe(
+            Stream.filter((event) => event.type === "turn.terminal"),
+            Stream.runHead,
+          ),
+        );
+        if (afterCancel.type !== "turn.terminal")
+          return yield* Effect.die("Expected recovery terminal");
+        assert.equal(afterCancel.status, "completed");
+        const concurrent = yield* Effect.all(
+          ["CONCURRENT_A", "CONCURRENT_B"].map((marker) =>
+            Effect.gen(function* () {
+              const appThreadId = ThreadId.make(`mc-real-${marker}`);
+              const session = yield* adapter.openSession({
+                threadId: appThreadId,
+                providerSessionId: ProviderSessionId.make(`mc-real-${marker}`),
+                modelSelection,
+                runtimePolicy,
+              });
+              const nativeThread = yield* session.ensureThread({
+                threadId: appThreadId,
+                modelSelection,
+                runtimePolicy,
+              });
+              yield* session.startTurn(
+                makeTurnInput({
+                  threadId: appThreadId,
+                  providerThread: nativeThread,
+                  instanceId,
+                  runtimePolicy,
+                  now: yield* DateTime.now,
+                  messageText: `T3-MC-FIXTURE-${marker}`,
+                }),
+              );
+              return { marker, session, nativeThread };
+            }),
+          ),
+          { concurrency: 2 },
+        );
+        yield* Effect.all(
+          concurrent.map(({ marker }) => waitForFixtureFile(`request-${marker}.started`)),
+          { concurrency: 2 },
+        );
+        const decodeMetadata = Schema.decodeSync(
+          Schema.fromJsonString(Schema.Record(Schema.String, Schema.String)),
+        );
+        const metadata = yield* Effect.all(
+          concurrent.map(({ marker }) =>
+            fs
+              .readFileString(path.join(fixture, `paths-${marker}.json`))
+              .pipe(Effect.map(decodeMetadata)),
+          ),
+        );
+        assert.notEqual(
+          concurrent[0]!.nativeThread.nativeThreadRef?.nativeId,
+          concurrent[1]!.nativeThread.nativeThreadRef?.nativeId,
+        );
+        for (const key of [
+          "databasePath",
+          "vectorDatabasePath",
+          "observabilityDatabasePath",
+        ] as const) {
+          assert.notEqual(metadata[0]![key], metadata[1]![key]);
+          for (const paths of metadata) {
+            const storagePath = paths[key]!;
+            const relative = path.relative(appDataDirectory, storagePath);
+            assert.isFalse(relative.startsWith("..") || path.isAbsolute(relative));
           }
         }
-        yield* Fiber.interrupt(listener);
-        // Native MC asks once to run submit_plan and once for its suspension.
-        // Both must remain explicit even when the T3 policy is full-access.
-        assert.equal(permissions, marker === "ALLOW" || marker === "PLAN" ? 2 : 1);
-        assert.equal(questions, marker === "ASK" ? 1 : 0);
-        assert.equal(plans, marker === "PLAN" ? 1 : 0);
-      }
-      yield* restored.startTurn(makeTurnInput({ threadId, providerThread: binding, instanceId, runtimePolicy,
-        now: yield* DateTime.now, ordinal: 7, messageText: "T3-MC-FIXTURE-INTERRUPT" }));
-      const runningEvent = Option.getOrThrow(yield* restored.events.pipe(
-        Stream.filter((event) => event.type === "provider_turn.updated" && event.providerTurn.status === "running"), Stream.runHead,
-      ));
-      if (runningEvent.type !== "provider_turn.updated") return yield* Effect.die("Expected running provider turn");
-      yield* waitForFixtureFile("request-INTERRUPT.started");
-      yield* restored.interruptTurn({ providerThread: binding, providerTurnId: runningEvent.providerTurn.id });
-      const cancelled = Option.getOrThrow(yield* restored.events.pipe(
-        Stream.filter((event) => event.type === "turn.terminal"), Stream.runHead,
-      ));
-      if (cancelled.type !== "turn.terminal") return yield* Effect.die("Expected cancellation terminal");
-      assert.equal(cancelled.status, "interrupted");
-      yield* waitForFixtureFile("interrupt-aborted");
-      yield* restored.startTurn(makeTurnInput({ threadId, providerThread: binding, instanceId, runtimePolicy,
-        now: yield* DateTime.now, ordinal: 8, messageText: "T3-MC-FIXTURE-RESUME" }));
-      const afterCancel = Option.getOrThrow(yield* restored.events.pipe(
-        Stream.filter((event) => event.type === "turn.terminal"), Stream.runHead,
-      ));
-      if (afterCancel.type !== "turn.terminal") return yield* Effect.die("Expected recovery terminal");
-      assert.equal(afterCancel.status, "completed");
-      const concurrent = yield* Effect.all(["CONCURRENT_A", "CONCURRENT_B"].map((marker) => Effect.gen(function* () {
-        const appThreadId = ThreadId.make(`mc-real-${marker}`);
-        const session = yield* adapter.openSession({ threadId: appThreadId,
-          providerSessionId: ProviderSessionId.make(`mc-real-${marker}`), modelSelection, runtimePolicy });
-        const nativeThread = yield* session.ensureThread({ threadId: appThreadId, modelSelection, runtimePolicy });
-        yield* session.startTurn(makeTurnInput({ threadId: appThreadId, providerThread: nativeThread, instanceId, runtimePolicy,
-          now: yield* DateTime.now, messageText: `T3-MC-FIXTURE-${marker}` }));
-        return { marker, session, nativeThread };
-      })), { concurrency: 2 });
-      yield* Effect.all(concurrent.map(({ marker }) => waitForFixtureFile(`request-${marker}.started`)), { concurrency: 2 });
-      const decodeMetadata = Schema.decodeSync(Schema.fromJsonString(Schema.Record(Schema.String, Schema.String)));
-      const metadata = yield* Effect.all(concurrent.map(({ marker }) => fs.readFileString(path.join(fixture, `paths-${marker}.json`)).pipe(Effect.map(decodeMetadata))));
-      assert.notEqual(concurrent[0]!.nativeThread.nativeThreadRef?.nativeId, concurrent[1]!.nativeThread.nativeThreadRef?.nativeId);
-      for (const key of ["databasePath", "vectorDatabasePath", "observabilityDatabasePath"] as const) {
-        assert.notEqual(metadata[0]![key], metadata[1]![key]);
         for (const paths of metadata) {
-          const storagePath = paths[key]!;
-          const relative = path.relative(appDataDirectory, storagePath);
-          assert.isFalse(relative.startsWith("..") || path.isAbsolute(relative));
+          assert.equal(paths.appDataDirectory, appDataDirectory);
+          assert.equal(paths.storageBackend, "libsql");
+          assert.equal(paths.databaseUrl, `file:${paths.databasePath}`);
+          assert.isTrue(yield* fs.exists(paths.databasePath!));
         }
-      }
-      for (const paths of metadata) {
-        assert.equal(paths.appDataDirectory, appDataDirectory);
-        assert.equal(paths.storageBackend, "libsql");
-        assert.equal(paths.databaseUrl, `file:${paths.databasePath}`);
-        assert.isTrue(yield* fs.exists(paths.databasePath!));
-      }
-      yield* fs.writeFileString(path.join(fixture, "release-concurrent"), "release");
-      yield* Effect.all(concurrent.map(({ session }) => session.events.pipe(
-        Stream.filter((event) => event.type === "turn.terminal"), Stream.runHead,
-        Effect.map((terminal) => {
-          const event = Option.getOrThrow(terminal);
-          assert.equal(event.type, "turn.terminal");
-          if (event.type === "turn.terminal") assert.equal(event.status, "completed");
-        }),
-      )), { concurrency: 2 });
-      assert.isFalse(yield* fs.exists(path.join(fixture, "unexpected-network")));
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+        yield* fs.writeFileString(path.join(fixture, "release-concurrent"), "release");
+        yield* Effect.all(
+          concurrent.map(({ session }) =>
+            session.events.pipe(
+              Stream.filter((event) => event.type === "turn.terminal"),
+              Stream.runHead,
+              Effect.map((terminal) => {
+                const event = Option.getOrThrow(terminal);
+                assert.equal(event.type, "turn.terminal");
+                if (event.type === "turn.terminal") assert.equal(event.status, "completed");
+              }),
+            ),
+          ),
+          { concurrency: 2 },
+        );
+        for (const args of [
+          ["init"],
+          ["config", "user.email", "fixture@example.com"],
+          ["config", "user.name", "Fixture"],
+          ["commit", "--allow-empty", "-m", "Fixture"],
+        ]) {
+          assert.equal(NodeChildProcess.spawnSync("git", args, { cwd: workspace }).status, 0);
+        }
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const socketThread = ThreadId.make("mc-native-socket-thread");
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("mc-native-socket-create"),
+            threadId: socketThread,
+            projectId: ProjectId.make("mc-native-socket-project"),
+            title: "Native MC sockets",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: workspace,
+            createdBy: "user",
+            creationSource: "web",
+          });
+          const question = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.threadId === socketThread &&
+                event.type === "runtime-request.updated" &&
+                event.payload.kind === "user_input" &&
+                event.payload.status === "pending",
+            ),
+            Stream.runHead,
+            Effect.forkChild({ startImmediately: true }),
+          );
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("mc-native-socket-send"),
+            threadId: socketThread,
+            messageId: MessageId.make("mc-native-socket-message"),
+            text: "T3-MC-FIXTURE-ASK_SOCKET",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+            dispatchMode: { type: "start_immediately" },
+          });
+          yield* worker.drain();
+          const pending = Option.getOrThrow(yield* Fiber.join(question));
+          if (pending.type !== "runtime-request.updated")
+            return yield* Effect.die("Expected native question");
+          const sockets = yield* openMastraCodeSocketFixture();
+          const clientA = yield* sockets.connect();
+          const disconnected = yield* sockets.connect();
+          const before = yield* disconnected.client[
+            ORCHESTRATION_V2_WS_METHODS.getThreadProjection
+          ]({ threadId: socketThread });
+          assert.equal(before.runtimeRequests[0]?.status, "pending");
+          const nativeId = before.providerThreads[0]?.nativeThreadRef?.nativeId;
+          assert.isString(nativeId);
+          yield* disconnected.close;
+          const clientB = yield* sockets.connect();
+          const queues = [];
+          for (const client of [clientA, clientB]) {
+            const queue = yield* Queue.unbounded<OrchestrationV2ThreadStreamItem>();
+            yield* client.client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({
+              threadId: socketThread,
+              requestCompletionMarker: true,
+            }).pipe(
+              Stream.runForEach((item) => Queue.offer(queue, item)),
+              Effect.forkIn(client.scope),
+            );
+            let sawPending = false;
+            while (true) {
+              const item = yield* Queue.take(queue);
+              if (item.kind === "snapshot")
+                sawPending = item.projection.runtimeRequests.some(
+                  (request) => request.id === pending.payload.id && request.status === "pending",
+                );
+              if (item.kind === "synchronized") break;
+            }
+            assert.isTrue(sawPending);
+            queues.push(queue);
+          }
+          const projection = yield* orchestrator.getThreadProjection(socketThread);
+          const inputItem = projection.turnItems.find((item) => item.type === "user_input_request");
+          if (inputItem?.type !== "user_input_request" || !inputItem.questions[0])
+            return yield* Effect.die("Missing native question identity");
+          const answer = {
+            type: "runtime-request.respond",
+            commandId: CommandId.make("mc-native-answer-a"),
+            threadId: socketThread,
+            requestId: pending.payload.id,
+            answers: { [inputItem.questions[0].id]: ["Blue"] },
+          } as const;
+          const second = { ...answer, commandId: CommandId.make("mc-native-answer-b") };
+          const completedRun = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.threadId === socketThread &&
+                event.type === "run.updated" &&
+                ["completed", "failed", "interrupted"].includes(event.payload.status),
+            ),
+            Stream.runHead,
+            Effect.forkChild({ startImmediately: true }),
+          );
+          // The provider finishes asynchronously after the answer effect. Keep
+          // consuming newly queued finalization/checkpoint effects as production
+          // does; a single drain can finish before those effects are enqueued.
+          yield* EffectWorker.runDaemon.pipe(Effect.forkChild({ startImmediately: true }));
+          const raced = yield* Effect.all(
+            [
+              clientA.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](answer).pipe(
+                Effect.result,
+              ),
+              clientB.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](second).pipe(
+                Effect.result,
+              ),
+            ],
+            { concurrency: 2 },
+          );
+          const winner = raced.find((result) => result._tag === "Success");
+          const loser = raced.find((result) => result._tag === "Failure");
+          if (winner?._tag !== "Success" || loser?._tag !== "Failure")
+            return yield* Effect.die("Expected one accepted native answer");
+          assert.isTrue(Schema.is(OrchestrationV2DispatchCommandError)(loser.failure));
+          if (!Schema.is(OrchestrationV2DispatchCommandError)(loser.failure))
+            return yield* Effect.die("Unexpected socket failure");
+          assert.equal(loser.failure.message, `Runtime request ${pending.payload.id} is resolved.`);
+          assert.equal(loser.failure.commandType, "runtime-request.respond");
+          assert.equal(
+            loser.failure.commandId,
+            raced[0]?._tag === "Failure" ? answer.commandId : second.commandId,
+          );
+          const retry = yield* clientB.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](
+            raced[0]?._tag === "Success" ? answer : second,
+          );
+          assert.equal(retry.sequence, winner.success.sequence);
+          yield* worker.drain();
+          const completedEvent = Option.getOrThrow(
+            yield* Fiber.join(completedRun).pipe(Effect.timeout("20 seconds")),
+          );
+          if (completedEvent.type !== "run.updated")
+            return yield* Effect.die("Expected terminal durable run");
+          assert.equal(completedEvent.payload.status, "completed");
+          yield* waitForFixtureFile("socket-ask-continuation-2.json");
+          for (const queue of queues) {
+            while (true) {
+              const item = yield* Queue.take(queue);
+              if (
+                item.kind === "event" &&
+                item.event.type === "runtime-request.updated" &&
+                item.event.payload.id === pending.payload.id &&
+                item.event.payload.status === "resolved"
+              )
+                break;
+            }
+          }
+          yield* clientB.close;
+          const reconnected = yield* sockets.connect();
+          const after = yield* reconnected.client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({
+            threadId: socketThread,
+          });
+          assert.equal(after.runtimeRequests[0]?.status, "resolved");
+          assert.equal(after.providerThreads[0]?.nativeThreadRef?.nativeId, nativeId);
+          const finalReplay = yield* reconnected.client[
+            ORCHESTRATION_V2_WS_METHODS.subscribeThread
+          ]({
+            threadId: socketThread,
+            requestCompletionMarker: true,
+          }).pipe(
+            Stream.takeUntil((item) => item.kind === "synchronized"),
+            Stream.runCollect,
+          );
+          assert.isTrue(
+            finalReplay.some(
+              (item) =>
+                item.kind === "snapshot" &&
+                item.projection.runtimeRequests.some(
+                  (request) => request.id === pending.payload.id && request.status === "resolved",
+                ),
+            ),
+          );
+          assert.isTrue(finalReplay.some((item) => item.kind === "synchronized"));
+          const continuation = Schema.decodeSync(
+            Schema.fromJsonString(
+              Schema.Struct({
+                callId: Schema.String,
+                outputs: Schema.Array(
+                  Schema.Struct({
+                    type: Schema.String,
+                    call_id: Schema.String,
+                    output: Schema.String,
+                  }),
+                ),
+              }),
+            ),
+          )(yield* fs.readFileString(path.join(fixture, "socket-ask-continuation-2.json")));
+          assert.lengthOf(continuation.outputs, 1);
+          assert.equal(continuation.outputs[0]?.type, "function_call_output");
+          assert.equal(continuation.outputs[0]?.call_id, continuation.callId);
+          assert.include(continuation.outputs[0]!.output, "Blue");
+          assert.isFalse(yield* fs.exists(path.join(fixture, "socket-ask-continuation-3.json")));
+        }).pipe(
+          Effect.provide(
+            makeOrchestratorV2ReplayLayerWithRegistry(
+              { name: "mc-native-two-client", runtimePolicyOverride: { cwd: workspace } },
+              ProviderAdapterRegistry.makeSingleLayer(adapter),
+              { runEffectWorker: false },
+            ),
+          ),
+        );
+        assert.isFalse(yield* fs.exists(path.join(fixture, "unexpected-network")));
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
     { timeout: 120_000 },
   );
 
-    it.live.each([
-      { exposesModels: true, initialPlan: false },
-      { exposesModels: true, initialPlan: true },
-      { exposesModels: false, initialPlan: false },
-      { exposesModels: false, initialPlan: true },
-    ])("negotiates MC legacy model switching only with advertised models ($exposesModels, initialPlan=$initialPlan)", ({ exposesModels, initialPlan }) =>
+  it.live.each([
+    { exposesModels: true, initialPlan: false },
+    { exposesModels: true, initialPlan: true },
+    { exposesModels: false, initialPlan: false },
+    { exposesModels: false, initialPlan: true },
+  ])(
+    "negotiates MC legacy model switching only with advertised models ($exposesModels, initialPlan=$initialPlan)",
+    ({ exposesModels, initialPlan }) =>
       Effect.gen(function* () {
         const modelCalls: string[] = [];
         const promptModels: string[] = [];
@@ -2189,62 +2610,104 @@ describe("AcpAdapterV2", () => {
             driver: ACP_TEST_DRIVER,
             capabilities: {
               ...AcpProviderCapabilitiesV2,
-              sessions: { ...AcpProviderCapabilitiesV2.sessions, supportsModelSwitchInSession: true },
+              sessions: {
+                ...AcpProviderCapabilitiesV2.sessions,
+                supportsModelSwitchInSession: true,
+              },
             },
             applyModelSelection: applyMastraCodeModelSelection,
-            sessionModeForPolicy: (policy) => policy.interactionMode === "plan" ? "plan" : "build",
+            sessionModeForPolicy: (policy) =>
+              policy.interactionMode === "plan" ? "plan" : "build",
             makeRuntime: makeMockRuntime({
               childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
               mockAgentPath,
               wrapRuntime: (runtime) => ({
                 ...runtime,
-                setMode: (modeId) => Effect.sync(() => { nativeMode = modeId; return {}; }),
+                setMode: (modeId) =>
+                  Effect.sync(() => {
+                    nativeMode = modeId;
+                    return {};
+                  }),
                 getModeState: Effect.sync(() => ({
                   currentModeId: nativeMode,
                   availableModes: ["build", "plan"].map((id) => ({ id, name: id })),
                 })),
-                getConfigOptions: runtime.getConfigOptions.pipe(Effect.map((options) => options.filter((option) => option.category !== "mode"))),
-                setSessionModel: (modelId) => Effect.sync(() => {
-                  modelCalls.push(`${nativeMode}:${modelId}`); modelsByMode[nativeMode] = modelId; return {};
-                }),
-                prompt: (payload, options) => Effect.sync(() => {
-                  promptModels.push(`${nativeMode}:${modelsByMode[nativeMode]}`);
-                }).pipe(Effect.andThen(runtime.prompt(payload, options))),
-                start: () => runtime.start().pipe(Effect.map((started) => ({
-                  ...started,
-                  sessionSetupResult: {
-                    sessionId: started.sessionId,
-                    ...(exposesModels ? { models: {
-                      currentModelId: "model-a",
-                      availableModels: ["model-a", "model-b"].map((modelId) => ({ modelId, name: modelId })),
-                    } } : {}),
-                  },
-                }))),
+                getConfigOptions: runtime.getConfigOptions.pipe(
+                  Effect.map((options) => options.filter((option) => option.category !== "mode")),
+                ),
+                setSessionModel: (modelId) =>
+                  Effect.sync(() => {
+                    modelCalls.push(`${nativeMode}:${modelId}`);
+                    modelsByMode[nativeMode] = modelId;
+                    return {};
+                  }),
+                prompt: (payload, options) =>
+                  Effect.sync(() => {
+                    promptModels.push(`${nativeMode}:${modelsByMode[nativeMode]}`);
+                  }).pipe(Effect.andThen(runtime.prompt(payload, options))),
+                start: () =>
+                  runtime.start().pipe(
+                    Effect.map((started) => ({
+                      ...started,
+                      sessionSetupResult: {
+                        sessionId: started.sessionId,
+                        ...(exposesModels
+                          ? {
+                              models: {
+                                currentModelId: "model-a",
+                                availableModels: ["model-a", "model-b"].map((modelId) => ({
+                                  modelId,
+                                  name: modelId,
+                                })),
+                              },
+                            }
+                          : {}),
+                      },
+                    })),
+                  ),
               }),
             }),
           },
         });
         const threadId = ThreadId.make("mc-legacy-models");
         const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
-          runtimeMode: "full-access", interactionMode: "default", cwd: process.cwd(),
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
         });
         const runtime = yield* adapter.openSession({
           threadId,
           providerSessionId: ProviderSessionId.make("mc-legacy-models"),
           modelSelection: { instanceId, model: "default" },
-          runtimePolicy: initialPlan ? { ...runtimePolicy, interactionMode: "plan" } : runtimePolicy,
+          runtimePolicy: initialPlan
+            ? { ...runtimePolicy, interactionMode: "plan" }
+            : runtimePolicy,
         });
-        assert.equal(runtime.providerSession.capabilities.sessions.supportsModelSwitchInSession, exposesModels);
+        assert.equal(
+          runtime.providerSession.capabilities.sessions.supportsModelSwitchInSession,
+          exposesModels,
+        );
         if (exposesModels) {
           const providerThread = yield* runtime.ensureThread({
-            threadId, runtimePolicy, modelSelection: { instanceId, model: "model-a" },
+            threadId,
+            runtimePolicy,
+            modelSelection: { instanceId, model: "model-a" },
           });
           for (const model of ["model-b", "model-a"]) {
-            const turnPolicy = model === "model-b" ? { ...runtimePolicy, interactionMode: "plan" as const } : runtimePolicy;
-            yield* runtime.startTurn(makeTurnInput({
-              threadId, providerThread, instanceId, runtimePolicy: turnPolicy,
-              now: yield* DateTime.now, modelSelection: { instanceId, model },
-            }));
+            const turnPolicy =
+              model === "model-b"
+                ? { ...runtimePolicy, interactionMode: "plan" as const }
+                : runtimePolicy;
+            yield* runtime.startTurn(
+              makeTurnInput({
+                threadId,
+                providerThread,
+                instanceId,
+                runtimePolicy: turnPolicy,
+                now: yield* DateTime.now,
+                modelSelection: { instanceId, model },
+              }),
+            );
             yield* runtime.events.pipe(
               Stream.filter((event) => event.type === "turn.terminal"),
               Stream.runHead,
@@ -2259,7 +2722,7 @@ describe("AcpAdapterV2", () => {
           assert.deepEqual(modelCalls, []);
         }
       }).pipe(Effect.provide(testLayer), Effect.scoped),
-    );
+  );
   it.effect("negotiates and executes optional native session forks through the ACP runtime", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -3824,8 +4287,14 @@ describe("AcpAdapterV2", () => {
   );
 
   it.effect.each([
-    { latePreparation: false, name: "cancels pending permission requests while interrupting an ACP turn" },
-    { latePreparation: true, name: "does not admit a late prepared plan after interrupting an ACP turn" },
+    {
+      latePreparation: false,
+      name: "cancels pending permission requests while interrupting an ACP turn",
+    },
+    {
+      latePreparation: true,
+      name: "does not admit a late prepared plan after interrupting an ACP turn",
+    },
   ])("$name", ({ latePreparation }) =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -3862,11 +4331,15 @@ describe("AcpAdapterV2", () => {
             childProcessSpawner,
             mockAgentPath,
             environment: { T3_ACP_EMIT_TOOL_CALLS: "1" },
-            wrapCancel: (cancel) => Deferred.succeed(cancelEntered, undefined).pipe(
-              Effect.andThen(Deferred.await(releaseCancel)), Effect.andThen(cancel),
-            ),
+            wrapCancel: (cancel) =>
+              Deferred.succeed(cancelEntered, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseCancel)),
+                Effect.andThen(cancel),
+              ),
             wrapOutgoingResponse: (onOutgoingResponse) => (requestId) =>
-              onOutgoingResponse(requestId).pipe(Effect.andThen(Deferred.succeed(responseWritten, undefined))),
+              onOutgoingResponse(requestId).pipe(
+                Effect.andThen(Deferred.succeed(responseWritten, undefined)),
+              ),
           }),
         },
         fileSystem,
@@ -3899,24 +4372,41 @@ describe("AcpAdapterV2", () => {
 
       if (latePreparation) {
         yield* Deferred.await(preparationEntered);
-        const running = Option.getOrThrow(yield* runtime.events.pipe(
-          Stream.filter((event) => event.type === "provider_turn.updated" && event.providerTurn.status === "running"),
-          Stream.runHead,
-        ));
-        if (running.type !== "provider_turn.updated") return yield* Effect.die("Expected a running provider turn");
-        const interruptFiber = yield* runtime.interruptTurn({
-          providerThread, providerTurnId: running.providerTurn.id,
-        }).pipe(Effect.forkScoped);
+        const running = Option.getOrThrow(
+          yield* runtime.events.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+            ),
+            Stream.runHead,
+          ),
+        );
+        if (running.type !== "provider_turn.updated")
+          return yield* Effect.die("Expected a running provider turn");
+        const interruptFiber = yield* runtime
+          .interruptTurn({
+            providerThread,
+            providerTurnId: running.providerTurn.id,
+          })
+          .pipe(Effect.forkScoped);
         yield* Deferred.await(cancelEntered);
         yield* Deferred.succeed(releasePreparation, undefined);
         yield* Deferred.await(responseWritten);
         yield* Deferred.succeed(releaseCancel, undefined);
         yield* Fiber.join(interruptFiber);
-        const events = Array.from(yield* runtime.events.pipe(
-          Stream.takeUntil((event) => event.type === "turn.terminal"), Stream.runCollect,
-        ));
+        const events = Array.from(
+          yield* runtime.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          ),
+        );
         assert.isFalse(events.some((event) => event.type === "plan.updated"));
-        assert.isFalse(events.some((event) => event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending"));
+        assert.isFalse(
+          events.some(
+            (event) =>
+              event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+          ),
+        );
         const terminal = events.at(-1);
         assert.equal(terminal?.type === "turn.terminal" && terminal.status, "interrupted");
         return;
@@ -3933,7 +4423,8 @@ describe("AcpAdapterV2", () => {
       );
       const planIndex = admissionEvents.findIndex((event) => event.type === "plan.updated");
       const pendingIndex = admissionEvents.findIndex(
-        (event) => event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+        (event) =>
+          event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
       );
       assert.isAtLeast(planIndex, 0);
       assert.isBelow(planIndex, pendingIndex);
@@ -4074,231 +4565,383 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
-  it.live("delivers admitted MC answers through durable dispatch and rejects unpublished overload", () =>
-    Effect.gen(function* () {
-      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const root = yield* fileSystem.makeTempDirectoryScoped();
-      const capacityRejected = yield* Deferred.make<void>();
-      for (const args of [["init"], ["config", "user.email", "fixture@example.com"], ["config", "user.name", "Fixture"], ["commit", "--allow-empty", "-m", "Fixture"]]) {
-        assert.equal(NodeChildProcess.spawnSync("git", args, { cwd: root }).status, 0);
-      }
-      const validationEntered = yield* Deferred.make<void>();
-      const releaseValidation = yield* Deferred.make<void>();
-      const responseWritten = yield* Deferred.make<void>();
-      const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
-      const workerSpawner = ChildProcessSpawner.make((command) => {
-        if (command._tag !== "StandardCommand" || !command.args.some((arg) => arg.includes("mastra-elicitation-worker"))) {
-          return childProcessSpawner.spawn(command);
+  it.live(
+    "delivers admitted MC answers through durable dispatch and rejects unpublished overload",
+    () =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped();
+        const capacityRejected = yield* Deferred.make<void>();
+        for (const args of [
+          ["init"],
+          ["config", "user.email", "fixture@example.com"],
+          ["config", "user.name", "Fixture"],
+          ["commit", "--allow-empty", "-m", "Fixture"],
+        ]) {
+          assert.equal(NodeChildProcess.spawnSync("git", args, { cwd: root }).status, 0);
         }
-        return Effect.gen(function* () {
-          yield* Deferred.succeed(validationEntered, undefined);
-          return ChildProcessSpawner.makeHandle({
-            pid: ChildProcessSpawner.ProcessId(1),
-            exitCode: Deferred.await(releaseValidation).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
-            isRunning: Effect.succeed(true), kill: () => Effect.void,
-            unref: Effect.succeed(Effect.void), stdin: Sink.drain,
-            stdout: Stream.encodeText(Stream.make("true")), stderr: Stream.empty, all: Stream.empty,
-            getInputFd: () => Sink.drain, getOutputFd: () => Stream.empty,
+        const validationEntered = yield* Deferred.make<void>();
+        const releaseValidation = yield* Deferred.make<void>();
+        const responseWritten = yield* Deferred.make<void>();
+        const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
+        const workerSpawner = ChildProcessSpawner.make((command) => {
+          if (
+            command._tag !== "StandardCommand" ||
+            !command.args.some((arg) => arg.includes("mastra-elicitation-worker"))
+          ) {
+            return childProcessSpawner.spawn(command);
+          }
+          return Effect.gen(function* () {
+            yield* Deferred.succeed(validationEntered, undefined);
+            return ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(1),
+              exitCode: Deferred.await(releaseValidation).pipe(
+                Effect.as(ChildProcessSpawner.ExitCode(0)),
+              ),
+              isRunning: Effect.succeed(true),
+              kill: () => Effect.void,
+              unref: Effect.succeed(Effect.void),
+              stdin: Sink.drain,
+              stdout: Stream.encodeText(Stream.make("true")),
+              stderr: Stream.empty,
+              all: Stream.empty,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
+            });
           });
         });
-      });
-      const instanceId = ProviderInstanceId.make("mc-durable-form");
-      const mockAgentPath = yield* path.fromFileUrl(new URL("../../../scripts/acp-mock-agent.ts", import.meta.url));
-      const mockRuntime = makeMockRuntime({
-        childProcessSpawner, mockAgentPath,
-        environment: { T3_ACP_EMIT_ELICITATION: "1", T3_ACP_ELICITATION_STRING: "1" },
-        protocolEvents,
-        wrapRuntime: (runtime) => ({ ...runtime, setMode: () => Effect.succeed({}) }),
-        wrapOutgoingResponse: (callback) => (requestId) => callback(requestId).pipe(
-          Effect.andThen(Effect.gen(function* () {
-            if (yield* Deferred.isDone(validationEntered)) {
-              yield* Deferred.succeed(responseWritten, undefined);
-            }
-          })),
-        ),
-      });
-      const adapter = makeAcpAdapterV2({
-        instanceId, crypto: yield* Crypto.Crypto, fileSystem,
-        idAllocator: yield* IdAllocator.IdAllocatorV2,
-        serverConfig: yield* ServerConfig.ServerConfig,
-        selfInvocation: yield* resolveSelfInvocation(),
-        flavor: {
-          driver: ProviderDriverKind.make("mastraCode"), capabilities: AcpProviderCapabilitiesV2,
-          acquireFormElicitation: () => acquireMastraCodeFormAdmission().pipe(
-            Effect.tapError(() => Deferred.succeed(capacityRejected, undefined)),
-          ),
-          prepareFormElicitation: (input) => prepareMastraCodeForm(input, (property, answer) =>
-            validateMastraCodeStringConstraints(property, answer).pipe(
-              Effect.provideService(Path.Path, path),
-              Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, workerSpawner),
-            )),
-          makeRuntime: mockRuntime,
-        },
-      });
-      // Canonical durable runtime + the production MC form hooks; only the
-      // external ACP subprocess and constraint worker are controlled fixtures.
-      const leases = yield* Effect.all(Array.from({ length: 32 }, () => acquireMastraCodeFormAdmission()));
-      try {
-        yield* Effect.gen(function* () {
-          const orchestrator = yield* Orchestrator.OrchestratorV2;
-          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-          const modelSelection = { instanceId, model: "default" } as const;
-          const create = (threadId: ThreadId) => orchestrator.dispatch({
-            type: "thread.create", commandId: CommandId.make(`create-${threadId}`), threadId,
-            projectId: ProjectId.make("mc-form-project"), title: "MC form",
-            modelSelection, runtimeMode: "full-access", interactionMode: "default",
-            branch: null, worktreePath: root, createdBy: "user", creationSource: "web",
-          });
-          const send = (threadId: ThreadId) => orchestrator.dispatch({
-            type: "message.dispatch", commandId: CommandId.make(`send-${threadId}`), threadId,
-            messageId: MessageId.make(`message-${threadId}`), text: "Ask", attachments: [],
-            createdBy: "user", creationSource: "web", dispatchMode: { type: "start_immediately" },
-          });
-          const rejectedId = ThreadId.make("mc-capacity-rejected");
-          yield* create(rejectedId);
-          const failed = yield* orchestrator.streamDomainEvents.pipe(
-            Stream.filter((event) => event.threadId === rejectedId && event.type === "run.updated" && event.payload.status === "failed"),
-            Stream.runHead, Effect.forkChild({ startImmediately: true }),
-          );
-          yield* send(rejectedId);
-          yield* worker.drain();
-          yield* Fiber.join(failed);
-          assert.lengthOf((yield* orchestrator.getThreadProjection(rejectedId)).runtimeRequests, 0);
-          const rejectedWrites = Array.from(yield* Queue.takeAll(protocolEvents)).flatMap((event) =>
-            event.direction === "outgoing" && event.stage === "raw" && typeof event.payload === "string" ? [event.payload] : [],
-          ).join("\n");
-          assert.isTrue(yield* Deferred.isDone(capacityRejected));
-          const nativeErrors = rejectedWrites.split("\n").flatMap((line) => {
-            const record = Option.getOrUndefined(decodeUnknownJson(line));
-            return typeof record === "object" && record !== null && "error" in record ? [record] : [];
-          });
-          assert.lengthOf(nativeErrors, 1);
-          yield* leases[0]!;
-          const threadId = ThreadId.make("mc-capacity-admitted");
-          yield* create(threadId);
-          const question = yield* orchestrator.streamDomainEvents.pipe(
-            Stream.filter((event) => event.threadId === threadId && event.type === "runtime-request.updated" && event.payload.status === "pending"),
-            Stream.runHead, Effect.forkChild({ startImmediately: true }),
-          );
-          yield* send(threadId);
-          yield* worker.drain();
-          const pending = Option.getOrThrow(yield* Fiber.join(question));
-          if (pending.type !== "runtime-request.updated") return yield* Effect.die("Expected durable question");
-          const sockets = yield* openMastraCodeSocketFixture();
-          const firstClient = yield* sockets.connect();
-          const disconnectedClient = yield* sockets.connect();
-          for (const client of [firstClient, disconnectedClient]) {
-            const snapshot = yield* client.client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({ threadId });
-            assert.equal(snapshot.runtimeRequests[0]?.id, pending.payload.id);
-            assert.equal(snapshot.runtimeRequests[0]?.status, "pending");
-          }
-          yield* disconnectedClient.close;
-          const secondClient = yield* sockets.connect();
-          assert.equal((yield* secondClient.client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({ threadId })).runtimeRequests[0]?.status, "pending");
-          const subscriptionQueues = [];
-          const subscriptionCursors: number[] = [];
-          for (const client of [firstClient, secondClient]) {
-            const queue = yield* Queue.unbounded<OrchestrationV2ThreadStreamItem>();
-            yield* client.client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({ threadId, requestCompletionMarker: true }).pipe(
-              Stream.runForEach((item) => Queue.offer(queue, item)),
-              Effect.forkIn(client.scope),
+        const instanceId = ProviderInstanceId.make("mc-durable-form");
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const mockRuntime = makeMockRuntime({
+          childProcessSpawner,
+          mockAgentPath,
+          environment: { T3_ACP_EMIT_ELICITATION: "1", T3_ACP_ELICITATION_STRING: "1" },
+          protocolEvents,
+          wrapRuntime: (runtime) => ({ ...runtime, setMode: () => Effect.succeed({}) }),
+          wrapOutgoingResponse: (callback) => (requestId) =>
+            callback(requestId).pipe(
+              Effect.andThen(
+                Effect.gen(function* () {
+                  if (yield* Deferred.isDone(validationEntered)) {
+                    yield* Deferred.succeed(responseWritten, undefined);
+                  }
+                }),
+              ),
+            ),
+        });
+        const adapter = makeAcpAdapterV2({
+          instanceId,
+          crypto: yield* Crypto.Crypto,
+          fileSystem,
+          idAllocator: yield* IdAllocator.IdAllocatorV2,
+          serverConfig: yield* ServerConfig.ServerConfig,
+          selfInvocation: yield* resolveSelfInvocation(),
+          flavor: {
+            driver: ProviderDriverKind.make("mastraCode"),
+            capabilities: AcpProviderCapabilitiesV2,
+            acquireFormElicitation: () =>
+              acquireMastraCodeFormAdmission().pipe(
+                Effect.tapError(() => Deferred.succeed(capacityRejected, undefined)),
+              ),
+            prepareFormElicitation: (input) =>
+              prepareMastraCodeForm(input, (property, answer) =>
+                validateMastraCodeStringConstraints(property, answer).pipe(
+                  Effect.provideService(Path.Path, path),
+                  Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, workerSpawner),
+                ),
+              ),
+            makeRuntime: mockRuntime,
+          },
+        });
+        // Canonical durable runtime + the production MC form hooks; only the
+        // external ACP subprocess and constraint worker are controlled fixtures.
+        const leases = yield* Effect.all(
+          Array.from({ length: 32 }, () => acquireMastraCodeFormAdmission()),
+        );
+        try {
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const modelSelection = { instanceId, model: "default" } as const;
+            const create = (threadId: ThreadId) =>
+              orchestrator.dispatch({
+                type: "thread.create",
+                commandId: CommandId.make(`create-${threadId}`),
+                threadId,
+                projectId: ProjectId.make("mc-form-project"),
+                title: "MC form",
+                modelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: root,
+                createdBy: "user",
+                creationSource: "web",
+              });
+            const send = (threadId: ThreadId) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make(`send-${threadId}`),
+                threadId,
+                messageId: MessageId.make(`message-${threadId}`),
+                text: "Ask",
+                attachments: [],
+                createdBy: "user",
+                creationSource: "web",
+                dispatchMode: { type: "start_immediately" },
+              });
+            const rejectedId = ThreadId.make("mc-capacity-rejected");
+            yield* create(rejectedId);
+            const failed = yield* orchestrator.streamDomainEvents.pipe(
+              Stream.filter(
+                (event) =>
+                  event.threadId === rejectedId &&
+                  event.type === "run.updated" &&
+                  event.payload.status === "failed",
+              ),
+              Stream.runHead,
+              Effect.forkChild({ startImmediately: true }),
             );
-            let sawPending = false;
-            while (true) {
-              const item = yield* Queue.take(queue);
-              if (item.kind === "snapshot") {
-                sawPending = item.projection.runtimeRequests.some((request) => request.id === pending.payload.id && request.status === "pending");
-                subscriptionCursors.push(item.snapshotSequence);
+            yield* send(rejectedId);
+            yield* worker.drain();
+            yield* Fiber.join(failed);
+            assert.lengthOf(
+              (yield* orchestrator.getThreadProjection(rejectedId)).runtimeRequests,
+              0,
+            );
+            const rejectedWrites = Array.from(yield* Queue.takeAll(protocolEvents))
+              .flatMap((event) =>
+                event.direction === "outgoing" &&
+                event.stage === "raw" &&
+                typeof event.payload === "string"
+                  ? [event.payload]
+                  : [],
+              )
+              .join("\n");
+            assert.isTrue(yield* Deferred.isDone(capacityRejected));
+            const nativeErrors = rejectedWrites.split("\n").flatMap((line) => {
+              const record = Option.getOrUndefined(decodeUnknownJson(line));
+              return typeof record === "object" && record !== null && "error" in record
+                ? [record]
+                : [];
+            });
+            assert.lengthOf(nativeErrors, 1);
+            yield* leases[0]!;
+            const threadId = ThreadId.make("mc-capacity-admitted");
+            yield* create(threadId);
+            const question = yield* orchestrator.streamDomainEvents.pipe(
+              Stream.filter(
+                (event) =>
+                  event.threadId === threadId &&
+                  event.type === "runtime-request.updated" &&
+                  event.payload.status === "pending",
+              ),
+              Stream.runHead,
+              Effect.forkChild({ startImmediately: true }),
+            );
+            yield* send(threadId);
+            yield* worker.drain();
+            const pending = Option.getOrThrow(yield* Fiber.join(question));
+            if (pending.type !== "runtime-request.updated")
+              return yield* Effect.die("Expected durable question");
+            const sockets = yield* openMastraCodeSocketFixture();
+            const firstClient = yield* sockets.connect();
+            const disconnectedClient = yield* sockets.connect();
+            for (const client of [firstClient, disconnectedClient]) {
+              const snapshot = yield* client.client[
+                ORCHESTRATION_V2_WS_METHODS.getThreadProjection
+              ]({ threadId });
+              assert.equal(snapshot.runtimeRequests[0]?.id, pending.payload.id);
+              assert.equal(snapshot.runtimeRequests[0]?.status, "pending");
+            }
+            yield* disconnectedClient.close;
+            const secondClient = yield* sockets.connect();
+            assert.equal(
+              (yield* secondClient.client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({
+                threadId,
+              })).runtimeRequests[0]?.status,
+              "pending",
+            );
+            const subscriptionQueues = [];
+            const subscriptionCursors: number[] = [];
+            for (const client of [firstClient, secondClient]) {
+              const queue = yield* Queue.unbounded<OrchestrationV2ThreadStreamItem>();
+              yield* client.client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({
+                threadId,
+                requestCompletionMarker: true,
+              }).pipe(
+                Stream.runForEach((item) => Queue.offer(queue, item)),
+                Effect.forkIn(client.scope),
+              );
+              let sawPending = false;
+              while (true) {
+                const item = yield* Queue.take(queue);
+                if (item.kind === "snapshot") {
+                  sawPending = item.projection.runtimeRequests.some(
+                    (request) => request.id === pending.payload.id && request.status === "pending",
+                  );
+                  subscriptionCursors.push(item.snapshotSequence);
+                }
+                if (item.kind === "synchronized") break;
               }
-              if (item.kind === "synchronized") break;
+              assert.isTrue(sawPending);
+              subscriptionQueues.push(queue);
             }
-            assert.isTrue(sawPending);
-            subscriptionQueues.push(queue);
-          }
-          const answer = {
-            type: "runtime-request.respond", commandId: CommandId.make("answer-mc-form"), threadId,
-            requestId: pending.payload.id, answers: { approved: ["owner@example.com"], secondEmail: ["second@example.com"] },
-          } as const;
-          const raced = yield* Effect.all([
-            firstClient.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](answer).pipe(Effect.result),
-            secondClient.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({ ...answer, commandId: CommandId.make("answer-mc-form-second-client") }).pipe(Effect.result),
-          ], { concurrency: "unbounded" });
-          assert.equal(raced.filter((result) => result._tag === "Success").length, 1);
-          assert.equal(raced.filter((result) => result._tag === "Failure").length, 1);
-          const loser = raced.find((result) => result._tag === "Failure");
-          const winner = raced.find((result) => result._tag === "Success");
-          if (loser?._tag !== "Failure" || winner?._tag !== "Success") return yield* Effect.die("Expected one committed answer and one rejection");
-          assert.isTrue(Schema.is(OrchestrationV2DispatchCommandError)(loser.failure));
-          if (!Schema.is(OrchestrationV2DispatchCommandError)(loser.failure)) return yield* Effect.die("Unexpected transport failure");
-          assert.equal(loser.failure.commandType, "runtime-request.respond");
-          assert.equal(loser.failure.commandId, raced[0]?._tag === "Failure" ? answer.commandId : "answer-mc-form-second-client");
-          assert.equal(loser.failure.message, `Runtime request ${pending.payload.id} is resolved.`);
-          const winningCommand = raced[0]?._tag === "Success" ? answer
-            : { ...answer, commandId: CommandId.make("answer-mc-form-second-client") };
-          // Retrying the committed command after a reconnect must return its
-          // original receipt, not emit a second native response.
-          const retry = yield* secondClient.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](winningCommand);
-          assert.equal(retry.sequence, winner.success.sequence);
-          const drain = yield* worker.drain().pipe(Effect.forkChild);
-          yield* Deferred.await(validationEntered);
-          assert.isFalse(yield* Deferred.isDone(responseWritten));
-          assert.equal((yield* orchestrator.getThreadProjection(threadId)).runtimeRequests[0]?.status, "resolved");
-          yield* Deferred.succeed(releaseValidation, undefined);
-          yield* Deferred.await(responseWritten);
-          yield* Fiber.join(drain);
-          for (const queue of subscriptionQueues) {
-            while (true) {
-              const item = yield* Queue.take(queue);
-              if (item.kind === "event" && item.event.type === "runtime-request.updated"
-                && item.event.payload.id === pending.payload.id && item.event.payload.status === "resolved") break;
+            const answer = {
+              type: "runtime-request.respond",
+              commandId: CommandId.make("answer-mc-form"),
+              threadId,
+              requestId: pending.payload.id,
+              answers: { approved: ["owner@example.com"], secondEmail: ["second@example.com"] },
+            } as const;
+            const raced = yield* Effect.all(
+              [
+                firstClient.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](answer).pipe(
+                  Effect.result,
+                ),
+                secondClient.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({
+                  ...answer,
+                  commandId: CommandId.make("answer-mc-form-second-client"),
+                }).pipe(Effect.result),
+              ],
+              { concurrency: "unbounded" },
+            );
+            assert.equal(raced.filter((result) => result._tag === "Success").length, 1);
+            assert.equal(raced.filter((result) => result._tag === "Failure").length, 1);
+            const loser = raced.find((result) => result._tag === "Failure");
+            const winner = raced.find((result) => result._tag === "Success");
+            if (loser?._tag !== "Failure" || winner?._tag !== "Success")
+              return yield* Effect.die("Expected one committed answer and one rejection");
+            assert.isTrue(Schema.is(OrchestrationV2DispatchCommandError)(loser.failure));
+            if (!Schema.is(OrchestrationV2DispatchCommandError)(loser.failure))
+              return yield* Effect.die("Unexpected transport failure");
+            assert.equal(loser.failure.commandType, "runtime-request.respond");
+            assert.equal(
+              loser.failure.commandId,
+              raced[0]?._tag === "Failure" ? answer.commandId : "answer-mc-form-second-client",
+            );
+            assert.equal(
+              loser.failure.message,
+              `Runtime request ${pending.payload.id} is resolved.`,
+            );
+            const winningCommand =
+              raced[0]?._tag === "Success"
+                ? answer
+                : { ...answer, commandId: CommandId.make("answer-mc-form-second-client") };
+            // Retrying the committed command after a reconnect must return its
+            // original receipt, not emit a second native response.
+            const retry =
+              yield* secondClient.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](
+                winningCommand,
+              );
+            assert.equal(retry.sequence, winner.success.sequence);
+            const drain = yield* worker.drain().pipe(Effect.forkChild);
+            yield* Deferred.await(validationEntered);
+            assert.isFalse(yield* Deferred.isDone(responseWritten));
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).runtimeRequests[0]?.status,
+              "resolved",
+            );
+            yield* Deferred.succeed(releaseValidation, undefined);
+            yield* Deferred.await(responseWritten);
+            yield* Fiber.join(drain);
+            for (const queue of subscriptionQueues) {
+              while (true) {
+                const item = yield* Queue.take(queue);
+                if (
+                  item.kind === "event" &&
+                  item.event.type === "runtime-request.updated" &&
+                  item.event.payload.id === pending.payload.id &&
+                  item.event.payload.status === "resolved"
+                )
+                  break;
+              }
             }
-          }
-          for (const client of [firstClient, secondClient]) {
-            const resolved = yield* client.client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({ threadId });
-            assert.lengthOf(resolved.runtimeRequests, 1);
-            assert.equal(resolved.runtimeRequests[0]?.status, "resolved");
-          }
-          const resumeCursor = subscriptionCursors[1];
-          if (resumeCursor === undefined) return yield* Effect.die("Missing saved subscription cursor");
-          yield* secondClient.close;
-          const resumedClient = yield* sockets.connect();
-          const replay = yield* resumedClient.client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({
-            threadId, afterSequence: resumeCursor, requestCompletionMarker: true,
+            for (const client of [firstClient, secondClient]) {
+              const resolved = yield* client.client[
+                ORCHESTRATION_V2_WS_METHODS.getThreadProjection
+              ]({ threadId });
+              assert.lengthOf(resolved.runtimeRequests, 1);
+              assert.equal(resolved.runtimeRequests[0]?.status, "resolved");
+            }
+            const resumeCursor = subscriptionCursors[1];
+            if (resumeCursor === undefined)
+              return yield* Effect.die("Missing saved subscription cursor");
+            yield* secondClient.close;
+            const resumedClient = yield* sockets.connect();
+            const replay = yield* resumedClient.client[ORCHESTRATION_V2_WS_METHODS.subscribeThread](
+              {
+                threadId,
+                afterSequence: resumeCursor,
+                requestCompletionMarker: true,
+              },
+            ).pipe(
+              Stream.takeUntil((item) => item.kind === "synchronized"),
+              Stream.runCollect,
+            );
+            assert.isFalse(replay.some((item) => item.kind === "snapshot"));
+            const resolvedReplay = replay.filter(
+              (item) =>
+                item.kind === "event" &&
+                item.event.type === "runtime-request.updated" &&
+                item.event.payload.id === pending.payload.id &&
+                item.event.payload.status === "resolved",
+            );
+            assert.lengthOf(resolvedReplay, 1);
+            for (const item of replay)
+              if (item.kind === "event") assert.isAbove(item.sequence, resumeCursor);
+            const writes = Array.from(yield* Queue.takeAll(protocolEvents))
+              .flatMap((event) =>
+                event.direction === "outgoing" &&
+                event.stage === "raw" &&
+                typeof event.payload === "string"
+                  ? [event.payload]
+                  : [],
+              )
+              .join("\n");
+            const nativeAnswers: ReadonlyArray<unknown> = writes.split("\n").flatMap((line) => {
+              const record = Option.getOrUndefined(decodeUnknownJson(line));
+              if (typeof record !== "object" || record === null || !("result" in record)) return [];
+              const result = record.result;
+              return typeof result === "object" && result !== null && "action" in result
+                ? [result]
+                : [];
+            });
+            assert.deepEqual(nativeAnswers, [
+              {
+                action: "accept",
+                content: { approved: "owner@example.com", secondEmail: "second@example.com" },
+              },
+            ]);
+            assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runtimeRequests, 1);
           }).pipe(
-            Stream.takeUntil((item) => item.kind === "synchronized"),
-            Stream.runCollect,
+            Effect.provide(
+              makeOrchestratorV2ReplayLayerWithRegistry(
+                { name: "mc-durable-admission", runtimePolicyOverride: { cwd: root } },
+                ProviderAdapterRegistry.makeSingleLayer(adapter),
+                { runEffectWorker: false },
+              ),
+            ),
           );
-          assert.isFalse(replay.some((item) => item.kind === "snapshot"));
-          const resolvedReplay = replay.filter((item) => item.kind === "event"
-            && item.event.type === "runtime-request.updated" && item.event.payload.id === pending.payload.id
-            && item.event.payload.status === "resolved");
-          assert.lengthOf(resolvedReplay, 1);
-          for (const item of replay) if (item.kind === "event") assert.isAbove(item.sequence, resumeCursor);
-          const writes = Array.from(yield* Queue.takeAll(protocolEvents)).flatMap((event) =>
-            event.direction === "outgoing" && event.stage === "raw" && typeof event.payload === "string" ? [event.payload] : [],
-          ).join("\n");
-          const nativeAnswers: ReadonlyArray<unknown> = writes.split("\n").flatMap((line) => {
-            const record = Option.getOrUndefined(decodeUnknownJson(line));
-            if (typeof record !== "object" || record === null || !("result" in record)) return [];
-            const result = record.result;
-            return typeof result === "object" && result !== null && "action" in result ? [result] : [];
-          });
-          assert.deepEqual(nativeAnswers, [{ action: "accept", content: { approved: "owner@example.com", secondEmail: "second@example.com" } }]);
-          assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runtimeRequests, 1);
-        }).pipe(Effect.provide(makeOrchestratorV2ReplayLayerWithRegistry(
-          { name: "mc-durable-admission", runtimePolicyOverride: { cwd: root } },
-          ProviderAdapterRegistry.makeSingleLayer(adapter),
-          { runEffectWorker: false },
-        )));
-      } finally { yield* Effect.all(leases); }
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+        } finally {
+          yield* Effect.all(leases);
+        }
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
   it.live.each([
-    { interruptDuringValidation: false, name: "carries elicitation request identity through the completed stdout write" },
-    { interruptDuringValidation: true, name: "drains admitted form validation before interrupting the turn" },
+    {
+      interruptDuringValidation: false,
+      name: "carries elicitation request identity through the completed stdout write",
+    },
+    {
+      interruptDuringValidation: true,
+      name: "drains admitted form validation before interrupting the turn",
+    },
   ])("$name", ({ interruptDuringValidation }) =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -4324,27 +4967,35 @@ describe("AcpAdapterV2", () => {
         flavor: {
           driver: ACP_TEST_DRIVER,
           capabilities: AcpProviderCapabilitiesV2,
-          acquireFormElicitation: () => Effect.succeed(
-            Deferred.succeed(formLeaseReleased, undefined).pipe(Effect.asVoid),
-          ),
+          acquireFormElicitation: () =>
+            Effect.succeed(Deferred.succeed(formLeaseReleased, undefined).pipe(Effect.asVoid)),
           prepareFormElicitation: ({ threadId }) => {
             assert.equal(threadId, ThreadId.make("thread-acp-reordered-elicitation"));
             return {
-              questions: [{
-                id: "approved",
-                header: "Confirmation",
-                question: "Enter the confirmation text",
-                options: [],
-                allowCustomAnswer: true,
-                answerFormat: "raw-string",
-              }],
-              respond: (answers) => Effect.gen(function* () {
-                yield* Deferred.succeed(validationEntered, undefined);
-                yield* Deferred.await(releaseValidation);
-                return answers === null
-                  ? { action: "cancel" as const }
-                  : { action: "accept" as const, content: { approved: Array.isArray(answers.approved) && answers.approved[0] === "true" } };
-              }),
+              questions: [
+                {
+                  id: "approved",
+                  header: "Confirmation",
+                  question: "Enter the confirmation text",
+                  options: [],
+                  allowCustomAnswer: true,
+                  answerFormat: "raw-string",
+                },
+              ],
+              respond: (answers) =>
+                Effect.gen(function* () {
+                  yield* Deferred.succeed(validationEntered, undefined);
+                  yield* Deferred.await(releaseValidation);
+                  return answers === null
+                    ? { action: "cancel" as const }
+                    : {
+                        action: "accept" as const,
+                        content: {
+                          approved:
+                            Array.isArray(answers.approved) && answers.approved[0] === "true",
+                        },
+                      };
+                }),
             };
           },
           makeRuntime: makeMockRuntime({
@@ -4352,7 +5003,8 @@ describe("AcpAdapterV2", () => {
             mockAgentPath,
             environment: { T3_ACP_EMIT_ELICITATION: "1" },
             protocolEvents,
-            wrapCancel: (cancel) => Deferred.succeed(cancelEntered, undefined).pipe(Effect.andThen(cancel)),
+            wrapCancel: (cancel) =>
+              Deferred.succeed(cancelEntered, undefined).pipe(Effect.andThen(cancel)),
             wrapOutgoingResponse: (onOutgoingResponse) => (requestId) =>
               Deferred.succeed(responseWritten, undefined).pipe(
                 Effect.andThen(Deferred.await(releaseResponseAcknowledgement)),
@@ -4416,11 +5068,13 @@ describe("AcpAdapterV2", () => {
       assert.isFalse(yield* Deferred.isDone(responseWritten));
       assert.isFalse(yield* Deferred.isDone(formLeaseReleased));
       const interruptFiber = interruptDuringValidation
-        ? yield* runtime.interruptTurn({
-            providerThread,
-            providerTurnId: pending.runtimeRequest.providerTurnId!,
-            requestRuntimeRestart: false,
-          }).pipe(Effect.forkScoped)
+        ? yield* runtime
+            .interruptTurn({
+              providerThread,
+              providerTurnId: pending.runtimeRequest.providerTurnId!,
+              requestRuntimeRestart: false,
+            })
+            .pipe(Effect.forkScoped)
         : undefined;
       if (interruptDuringValidation) {
         yield* Effect.yieldNow;
@@ -4436,12 +5090,19 @@ describe("AcpAdapterV2", () => {
       yield* Deferred.await(formLeaseReleased);
       if (interruptFiber !== undefined) yield* Fiber.join(interruptFiber);
       const actions = Array.from(yield* Queue.takeAll(protocolEvents)).flatMap((event) => {
-        if (event.direction !== "outgoing" || event.stage !== "raw" || typeof event.payload !== "string") return [];
+        if (
+          event.direction !== "outgoing" ||
+          event.stage !== "raw" ||
+          typeof event.payload !== "string"
+        )
+          return [];
         return event.payload.split("\n").flatMap((line) => {
           const decoded = Option.getOrUndefined(decodeUnknownJson(line));
           if (typeof decoded !== "object" || decoded === null || !("result" in decoded)) return [];
           const result = decoded.result;
-          return typeof result === "object" && result !== null && "action" in result ? [result.action] : [];
+          return typeof result === "object" && result !== null && "action" in result
+            ? [result.action]
+            : [];
         });
       });
       assert.deepEqual(actions, ["accept"]);
