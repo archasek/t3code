@@ -380,6 +380,7 @@ export const makeMastraCodeAuth = Effect.fn("makeMastraCodeAuth")(function* (inp
   readonly binaryPath: string;
   readonly appDataDirectory: string;
   readonly environment: NodeJS.ProcessEnv;
+  readonly onChanged: (signedIn: boolean) => Effect.Effect<void, ProviderSetupError>;
 }): Effect.fn.Return<
   ProviderAuthController,
   never,
@@ -406,12 +407,18 @@ export const makeMastraCodeAuth = Effect.fn("makeMastraCodeAuth")(function* (inp
         binaryPath: input.binaryPath,
         environment: input.environment,
         context,
-      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner)),
+      }).pipe(
+        Effect.andThen(() => input.onChanged(true)),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+      ),
     logout: runLogout({
       instanceId: input.instanceId,
       binaryPath: input.binaryPath,
       environment: input.environment,
-    }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner)),
+    }).pipe(
+      Effect.andThen(() => input.onChanged(false)),
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+    ),
   });
   return auth;
 });

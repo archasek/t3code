@@ -1,9 +1,16 @@
 import { describe, expect, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { ProviderInstanceId, ProviderSetupError } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
+import * as Option from "effect/Option";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   isMastraCodeAuthLoginSuccessful,
   parseMastraCodeAuthJsonlLine,
   parseMastraCodeDeviceCodeEvent,
+  makeMastraCodeAuth,
 } from "./MastraCodeAuth.ts";
 
 const validEvent = {
@@ -41,6 +48,59 @@ describe("parseMastraCodeDeviceCodeEvent", () => {
     ).toBeUndefined();
   });
 });
+
+it.effect.each([false, true])(
+  "refreshes native auth before terminal publication (failure=%s)",
+  (verificationFails) =>
+    Effect.gen(function* () {
+      const nativeSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const changes: boolean[] = [];
+      const spawner = ChildProcessSpawner.make((command) => {
+        if (!ChildProcess.isStandardCommand(command)) return Effect.die("Unexpected pipeline");
+        const login = command.args.includes("login");
+        const events = login
+          ? [
+              { ...validEvent, expiresAt: "2099-01-01T00:00:00.000Z" },
+              { type: "success", provider: "openai-codex" },
+            ]
+          : [];
+        return nativeSpawner.spawn(
+          ChildProcess.make(process.execPath, [
+            "-e",
+            `process.stdout.write(${JSON.stringify(events.map((event) => JSON.stringify(event)).join("\n") + "\n")})`,
+          ]),
+        );
+      });
+      const controller = yield* makeMastraCodeAuth({
+        instanceId: ProviderInstanceId.make("mc-auth-refresh"),
+        binaryPath: process.execPath,
+        appDataDirectory: "/unused-test-only",
+        environment: { PATH: process.env.PATH },
+        onChanged: (signedIn) =>
+          Effect.gen(function* () {
+            changes.push(signedIn);
+            if (signedIn && verificationFails)
+              return yield* new ProviderSetupError({
+                instanceId: ProviderInstanceId.make("mc-auth-refresh"),
+                operation: "start",
+                detail: "Could not verify native sign-in.",
+              });
+          }),
+      }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+      yield* controller.start("owner");
+      const terminal = yield* controller.subscribe("owner").pipe(
+        Stream.filter((state) => state.phase === "succeeded" || state.phase === "failed"),
+        Stream.runHead,
+        Effect.map(Option.getOrThrow),
+        Effect.timeout("10 seconds"),
+      );
+      expect(changes).toEqual([true]);
+      expect(terminal.phase).toBe(verificationFails ? "failed" : "succeeded");
+      if (verificationFails) expect(terminal.message).toBe("Could not verify native sign-in.");
+      yield* controller.logout(Effect.void);
+      expect(changes).toEqual([true, false]);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 
 describe("parseMastraCodeAuthJsonlLine", () => {
   it("preserves the unreadable auth-store diagnostic", () => {

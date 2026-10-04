@@ -1,4 +1,4 @@
-import { MastraCodeSettings, ProviderDriverKind } from "@t3tools/contracts";
+import { MastraCodeSettings, ProviderDriverKind, ProviderSetupError } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -164,6 +164,21 @@ export const MastraCodeDriver: ProviderDriver<MastraCodeSettings, MastraCodeDriv
         binaryPath: effectiveConfig.binaryPath,
         appDataDirectory,
         environment: providerEnvironment,
+        onChanged: (signedIn): Effect.Effect<void, ProviderSetupError> =>
+          managedSnapshot.refresh.pipe(
+            Effect.flatMap((provider) =>
+              provider.auth.status === (signedIn ? "authenticated" : "unauthenticated")
+                ? Effect.void
+                : Effect.fail(
+                    new ProviderSetupError({
+                      instanceId,
+                      operation: signedIn ? "start" : "logout",
+                      detail:
+                        "Could not verify the Mastra Code sign-in state. Refresh provider status.",
+                    }),
+                  ),
+            ),
+          ),
       }).pipe(
         Effect.provideService(Crypto.Crypto, crypto),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
@@ -225,12 +240,16 @@ export const MastraCodeDriver: ProviderDriver<MastraCodeSettings, MastraCodeDriv
         idAllocator: yield* IdAllocator.IdAllocatorV2,
         serverConfig,
         selfInvocation: yield* resolveSelfInvocation(),
-        wrapRuntime: (task) => auth.withAccess!(task).pipe(
-          Effect.mapError((cause) => new AcpErrors.AcpTransportError({
-            detail: "Mastra Code process admission failed",
-            cause,
-          })),
-        ),
+        wrapRuntime: (task) =>
+          auth.withAccess!(task).pipe(
+            Effect.mapError(
+              (cause) =>
+                new AcpErrors.AcpTransportError({
+                  detail: "Mastra Code process admission failed",
+                  cause,
+                }),
+            ),
+          ),
       });
       const textGeneration = yield* makeMastraCodeTextGeneration;
 
