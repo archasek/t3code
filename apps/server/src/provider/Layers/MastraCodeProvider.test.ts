@@ -207,6 +207,7 @@ it.layer(NodeServices.layer)("checkMastraCodeProviderStatus", (it) => {
               { id: "model-plan-only", modes: ["plan"] },
               { id: "model-build-first", modes: ["build", "plan"] },
               { id: "model-build-second", modes: ["build"] },
+              { id: "openai/gpt-5.4-mini", modes: ["fast"] },
               { id: "model-unconstrained" },
             ],
           },
@@ -218,12 +219,14 @@ it.layer(NodeServices.layer)("checkMastraCodeProviderStatus", (it) => {
           ["plan"],
           ["default", "plan"],
           ["default"],
+          ["default"],
           undefined,
         ]);
         expect(snapshot.models.map(({ slug, isDefault }) => [slug, isDefault ?? false])).toEqual([
           ["model-plan-only", false],
           ["model-build-first", true],
           ["model-build-second", false],
+          ["openai/gpt-5.4-mini", false],
           ["model-unconstrained", false],
         ]);
       }),

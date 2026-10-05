@@ -170,7 +170,11 @@ function modelsFromInfo(info: MastraCodeInfo | undefined): ReadonlyArray<ServerP
           ? {}
           : {
               supportedInteractionModes: modes.flatMap((mode) =>
-                mode === "build" ? ["default" as const] : mode === "plan" ? ["plan" as const] : [],
+                mode === "build" || mode === "fast"
+                  ? ["default" as const]
+                  : mode === "plan"
+                    ? ["plan" as const]
+                    : [],
               ),
             }),
         capabilities: EMPTY_CAPABILITIES,
