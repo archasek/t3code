@@ -1487,7 +1487,8 @@ const defaultEnabledForDriver = (driver: ProviderDriverKind): boolean => {
  * Resolve whether a configured provider instance is enabled. An explicit
  * false on either the envelope or the in-config flag wins (most
  * restrictive), so a user's disable is never silently undone by the other
- * flag. Otherwise: envelope, then config, then the driver's default.
+ * flag. Otherwise: envelope, then config, then the driver's default. Configured
+ * Mastra Code entries keep their pre-opt-in enabled behavior.
  */
 export const resolveProviderInstanceEnabled = (
   instance: Pick<ProviderInstanceConfig, "driver" | "enabled" | "config">,
@@ -1496,7 +1497,12 @@ export const resolveProviderInstanceEnabled = (
   if (instance.enabled === false || configEnabled === false) {
     return false;
   }
-  return instance.enabled ?? configEnabled ?? defaultEnabledForDriver(instance.driver);
+  // Explicitly configured MC instances existed before its legacy opt-in default.
+  return (
+    instance.enabled ??
+    configEnabled ??
+    (instance.driver === "mastraCode" ? true : defaultEnabledForDriver(instance.driver))
+  );
 };
 
 export const ServerSettingsOperation = Schema.Literals([

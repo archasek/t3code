@@ -48,7 +48,7 @@ const MastraCodeInfoSchema = Schema.Struct({
   models: Schema.Array(
     Schema.Struct({
       id: Schema.String,
-      modes: Schema.Array(Schema.String),
+      modes: Schema.optional(Schema.Array(Schema.String)),
     }),
   ),
   auth: Schema.Struct({
@@ -154,9 +154,9 @@ function modelsFromInfo(info: MastraCodeInfo | undefined): ReadonlyArray<ServerP
   const seen = new Set<string>();
   const models = info?.models ?? [];
   const defaultBuildModel = models
-    .find(({ id, modes }) => id.trim() && modes.includes("build"))
+    .find(({ id, modes }) => id.trim() && (modes === undefined || modes.includes("build")))
     ?.id.trim();
-  return models.flatMap(({ id }) => {
+  return models.flatMap(({ id, modes }) => {
     const slug = id.trim();
     if (!slug || slug.length > 256 || seen.has(slug)) return [];
     seen.add(slug);
@@ -166,6 +166,13 @@ function modelsFromInfo(info: MastraCodeInfo | undefined): ReadonlyArray<ServerP
         name: slug,
         isCustom: false,
         ...(slug === defaultBuildModel ? { isDefault: true } : {}),
+        ...(modes === undefined
+          ? {}
+          : {
+              supportedInteractionModes: modes.flatMap((mode) =>
+                mode === "build" ? ["default" as const] : mode === "plan" ? ["plan" as const] : [],
+              ),
+            }),
         capabilities: EMPTY_CAPABILITIES,
       },
     ];

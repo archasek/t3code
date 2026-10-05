@@ -20,6 +20,8 @@ import {
   normalizeCustomModelSlug,
   normalizeModelSlug,
   modelSelectionsEqual,
+  modelSupportsInteractionMode,
+  resolveInteractionModeModel,
 } from "./model.ts";
 
 it("keeps the Codex catalog display formatting", () => {
@@ -362,4 +364,22 @@ describe("provider-reported option display", () => {
   ])("ignores reports after changing the model, instance, or option: %j", (selected) => {
     expect(getProviderOptionCurrentLabel(descriptor, selected, reported)).toBe("Unknown");
   });
+});
+
+it("resolves plan-only/build-only/both and unconstrained native models on mode changes", () => {
+  const models = [
+    { slug: "build", supportedInteractionModes: ["default"] as const, isDefault: true },
+    { slug: "plan", supportedInteractionModes: ["plan"] as const },
+    { slug: "both", supportedInteractionModes: ["default", "plan"] as const },
+    { slug: "unspecified" },
+  ];
+  expect(resolveInteractionModeModel(models, "build", "plan")).toBe("plan");
+  expect(resolveInteractionModeModel(models, "plan", "default")).toBe("build");
+  for (const mode of ["default", "plan"] as const) {
+    expect(resolveInteractionModeModel(models, "both", mode)).toBe("both");
+    expect(resolveInteractionModeModel(models, "unspecified", mode)).toBe("unspecified");
+    expect(modelSupportsInteractionMode(undefined, mode)).toBe(true);
+  }
+  expect(resolveInteractionModeModel([models[0]!], "build", "plan")).toBeNull();
+  expect(resolveInteractionModeModel([models[1]!], "custom-or-stale", "default")).toBeNull();
 });

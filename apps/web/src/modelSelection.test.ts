@@ -904,3 +904,77 @@ describe("resolveAppModelSelectionState with the opencode plan agent", () => {
     );
   });
 });
+
+it("web mode resolution keeps all native MC modes and invalidates incompatible/custom picks", () => {
+  const instanceId = ProviderInstanceId.make("mastraCode");
+  const settings = { ...DEFAULT_UNIFIED_SETTINGS };
+  const providers = [
+    {
+      instanceId,
+      driver: "mastraCode",
+      enabled: true,
+      installed: true,
+      auth: { status: "authenticated" },
+      models: [
+        {
+          slug: "build",
+          name: "Build",
+          isCustom: false,
+          isDefault: true,
+          capabilities: null,
+          supportedInteractionModes: ["default"],
+        },
+        {
+          slug: "plan",
+          name: "Plan",
+          isCustom: false,
+          capabilities: null,
+          supportedInteractionModes: ["plan"],
+        },
+        {
+          slug: "both",
+          name: "Both",
+          isCustom: false,
+          capabilities: null,
+          supportedInteractionModes: ["default", "plan"],
+        },
+        { slug: "absent", name: "Absent metadata", isCustom: false, capabilities: null },
+        { slug: "custom", name: "Custom", isCustom: true, capabilities: null },
+      ],
+    },
+  ] as unknown as ServerProvider[];
+  expect(
+    resolveAppModelSelectionForInstance(instanceId, settings, providers, "build", {
+      interactionMode: "plan",
+    }),
+  ).toBe("plan");
+  expect(
+    resolveAppModelSelectionForInstance(instanceId, settings, providers, "plan", {
+      interactionMode: "default",
+    }),
+  ).toBe("build");
+  expect(
+    resolveAppModelSelectionForInstance(instanceId, settings, providers, "both", {
+      interactionMode: "plan",
+    }),
+  ).toBe("both");
+  expect(
+    resolveAppModelSelectionForInstance(instanceId, settings, providers, "absent", {
+      interactionMode: "plan",
+    }),
+  ).toBe("absent");
+  expect(
+    resolveAppModelSelectionForInstance(instanceId, settings, providers, "custom", {
+      interactionMode: "plan",
+    }),
+  ).toBe("plan");
+  const planOnly = providers.map((provider) => ({
+    ...provider,
+    models: provider.models.filter((model) => model.slug === "plan"),
+  }));
+  expect(
+    resolveAppModelSelectionForInstance(instanceId, settings, planOnly, "stale", {
+      interactionMode: "default",
+    }),
+  ).toBeNull();
+});

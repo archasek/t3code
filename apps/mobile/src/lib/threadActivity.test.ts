@@ -1946,7 +1946,11 @@ describe("pending user input answers", () => {
   it.each(["", "  ", " padded ", "first\nsecond\n"])(
     "preserves raw MC answer %j",
     (customAnswer) => {
-      const question = { ...singleSelectQuestion, answerFormat: "raw-string" as const };
+      const question = {
+        ...singleSelectQuestion,
+        answerFormat: "raw-string" as const,
+        allowEmptyAnswer: true,
+      };
       expect(buildPendingUserInputAnswers([question], {})).toBeNull();
       const draft = setPendingUserInputCustomAnswer(
         question,
@@ -2394,3 +2398,59 @@ it.each(["provider_error", "usage_limit"] as const)(
     });
   },
 );
+
+it.each([false, undefined, true])(
+  "mobile only completes eligible empty literals (%s)",
+  (allowEmptyAnswer) => {
+    const question = {
+      ...singleSelectQuestion,
+      answerFormat: "raw-string" as const,
+      allowEmptyAnswer,
+    };
+    const draft = setPendingUserInputCustomAnswer(question, undefined, "");
+    expect(buildPendingUserInputAnswers([question], { [question.id]: draft })).toEqual(
+      allowEmptyAnswer ? { [question.id]: "" } : null,
+    );
+    expect(
+      buildPendingUserInputAnswers([question], { [question.id]: { customAnswer: "  " } }),
+    ).toEqual({ [question.id]: "  " });
+    if (allowEmptyAnswer !== true) {
+      expect(
+        buildPendingUserInputAnswers([question], {
+          [question.id]: { customAnswer: "", selectedOptionValues: ["Go"], attachmentCount: 1 },
+        }),
+      ).toBeNull();
+      expect(
+        buildPendingUserInputAnswers([question], { [question.id]: { attachmentCount: 1 } }),
+      ).toBeNull();
+    }
+  },
+);
+
+it("mobile omission clears choices and real choices clear omission", () => {
+  const question = {
+    ...singleSelectQuestion,
+    multiSelect: true,
+    options: [
+      { label: "First", description: "", value: "a" },
+      { label: "Second", description: "", value: "b" },
+      { label: "Leave unset", description: "", value: "omit", exclusive: true },
+    ],
+  };
+  let draft = togglePendingUserInputOptionSelection(question, undefined, "a");
+  draft = togglePendingUserInputOptionSelection(question, draft, "b");
+  expect(buildPendingUserInputAnswers([question], { [question.id]: draft })).toEqual({
+    [question.id]: ["a", "b"],
+  });
+  draft = togglePendingUserInputOptionSelection(question, draft, "omit");
+  expect(buildPendingUserInputAnswers([question], { [question.id]: draft })).toEqual({
+    [question.id]: ["omit"],
+  });
+  draft = togglePendingUserInputOptionSelection(question, draft, "a");
+  expect(buildPendingUserInputAnswers([question], { [question.id]: draft })).toEqual({
+    [question.id]: ["a"],
+  });
+  draft = togglePendingUserInputOptionSelection(question, draft, "omit");
+  draft = togglePendingUserInputOptionSelection(question, draft, "omit");
+  expect(buildPendingUserInputAnswers([question], { [question.id]: draft })).toBeNull();
+});

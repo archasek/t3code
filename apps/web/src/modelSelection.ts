@@ -14,6 +14,7 @@ import {
   normalizeCustomModelSlug,
   readCustomModelEntries,
   resolveSelectableModel,
+  resolveInteractionModeModel,
 } from "@t3tools/shared/model";
 import { getComposerProviderState } from "./components/chat/composerProviderState";
 import { UnifiedSettings } from "@t3tools/contracts/settings";
@@ -290,12 +291,22 @@ export function resolveAppModelSelectionForInstance(
   settings: UnifiedSettings,
   providers: ReadonlyArray<ServerProvider>,
   selectedModel: string | null | undefined,
-  resolutionOptions?: { readonly preserveUnavailableSelection?: boolean },
+  resolutionOptions?: {
+    readonly preserveUnavailableSelection?: boolean;
+    readonly interactionMode?: "default" | "plan";
+  },
 ): string | null {
   const entry = deriveProviderInstanceEntries(providers).find(
     (candidate) => candidate.instanceId === instanceId,
   );
   if (!entry) return null;
+  if (entry.driverKind === "mastraCode" && resolutionOptions?.interactionMode !== undefined) {
+    return resolveInteractionModeModel(
+      entry.models.filter((model) => !model.isCustom),
+      selectedModel,
+      resolutionOptions.interactionMode,
+    );
+  }
   const options = getAppModelOptionsForInstance(
     settings,
     entry,

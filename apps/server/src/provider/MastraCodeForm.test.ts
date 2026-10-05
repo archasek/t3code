@@ -2,9 +2,12 @@ import { ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as AcpErrors from "effect-acp/errors";
 import * as Layer from "effect/Layer";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as Path from "effect/Path";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodePath from "@effect/platform-node/NodePath";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { describe, expect, it } from "@effect/vitest";
@@ -112,7 +115,7 @@ describe("MastraCodeForm", () => {
     Effect.gen(function* () {
       const entered = yield* Deferred.make<void>();
       const verdict = yield* Deferred.make<boolean>();
-      const prepared = prepareMastraCodeForm(
+      const prepared = yield* prepareMastraCodeForm(
         {
           request: {
             mode: "form",
@@ -129,6 +132,7 @@ describe("MastraCodeForm", () => {
           Effect.gen(function* () {
             expect(property.type).toBe("string");
             expect(property.type === "string" ? property.format : undefined).toBe("email");
+            if (answer === "") return false;
             expect(answer).toBe("not-an-email");
             yield* Deferred.succeed(entered, undefined);
             return yield* Deferred.await(verdict);
@@ -143,7 +147,7 @@ describe("MastraCodeForm", () => {
   );
   it.effect("preserves titled multi-select native values", () =>
     Effect.gen(function* () {
-      const prepared = form({
+      const prepared = yield* form({
         properties: {
           choices: {
             type: "array",
@@ -166,7 +170,7 @@ describe("MastraCodeForm", () => {
   );
   it.effect.each(["", "  padded  ", "first\nsecond"])("preserves the literal string %j", (answer) =>
     Effect.gen(function* () {
-      const prepared = form({
+      const prepared = yield* form({
         type: "object",
         properties: { text: { type: "string" } },
         required: ["text"],
@@ -182,7 +186,7 @@ describe("MastraCodeForm", () => {
 
   it.effect("coerces scalars, preserves enum values and array choices", () =>
     Effect.gen(function* () {
-      const prepared = form({
+      const prepared = yield* form({
         type: "object",
         properties: {
           count: { type: "integer", minimum: 1, maximum: 3 },
@@ -222,13 +226,16 @@ describe("MastraCodeForm", () => {
 
   it.effect("omits an optional value but rejects mixing its sentinel with choices", () =>
     Effect.gen(function* () {
-      const prepared = form({
+      const prepared = yield* form({
         type: "object",
         properties: { tags: { type: "array", items: { type: "string", enum: ["x"] } } },
       });
       const skip = prepared.questions[0]!.options.find(
         (option) => option.label === "Leave unset",
       )!.value!;
+      expect(
+        prepared.questions[0]!.options.find((option) => option.value === skip)?.exclusive,
+      ).toBe(true);
       expect(yield* prepared.respond({ tags: [skip] })).toEqual({ action: "accept", content: {} });
       expect(yield* prepared.respond({ tags: [skip, "x"] })).toEqual({ action: "cancel" });
     }),
@@ -236,7 +243,7 @@ describe("MastraCodeForm", () => {
 
   it.effect("requires confirmation for an empty form and fails closed on invalid schema", () =>
     Effect.gen(function* () {
-      const prepared = form({ type: "object", properties: {} });
+      const prepared = yield* form({ type: "object", properties: {} });
       const id = prepared.questions[0]!.id;
       expect(yield* prepared.respond({ [id]: ["accept"] })).toEqual({
         action: "accept",
@@ -244,10 +251,133 @@ describe("MastraCodeForm", () => {
       });
       expect(yield* prepared.respond({ [id]: ["decline"] })).toEqual({ action: "decline" });
       expect(
-        yield* form({ properties: { text: { type: "unsupported" } } }).respond({
+        yield* (yield* form({ properties: { text: { type: "unsupported" } } })).respond({
           [id]: ["accept"],
         }),
       ).toEqual({ action: "cancel" });
     }),
   );
 });
+
+// Exercise eligibility through the same bounded worker used for native replies.
+it.layer(NodeServices.layer)("MC empty string eligibility", (it) => {
+  it.effect.each([
+    { property: { type: "string", minLength: 1 }, eligible: false, answer: "value" },
+    { property: { type: "string", format: "email" }, eligible: false, answer: "a@example.com" },
+    { property: { type: "string", pattern: "^.+$" }, eligible: false, answer: "value" },
+    { property: { type: "string" }, eligible: true, answer: "" },
+    { property: { type: "string", pattern: "^$" }, eligible: true, answer: "" },
+  ])("publishes truthful eligibility for $property", ({ property, eligible, answer }) =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const prepared = yield* prepareMastraCodeForm(
+        {
+          request: {
+            mode: "form",
+            message: "Exact value",
+            requestedSchema: { properties: { value: property }, required: ["value"] },
+          },
+          nativeRequestId: "empty-eligibility",
+          threadId: ThreadId.make("thread-1"),
+        },
+        (property, answer) =>
+          validateMastraCodeStringConstraints(property, answer).pipe(
+            Effect.provideService(Path.Path, path),
+            Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          ),
+      );
+      expect(prepared.questions[0]).toMatchObject({
+        answerFormat: "raw-string",
+        allowEmptyAnswer: eligible,
+      });
+      expect(yield* prepared.respond({ value: "" })).toEqual(
+        eligible ? { action: "accept", content: { value: "" } } : { action: "cancel" },
+      );
+      expect(yield* prepared.respond({ value: answer })).toEqual({
+        action: "accept",
+        content: { value: answer },
+      });
+    }),
+  );
+});
+
+it.effect("awaits empty eligibility before publishing a form", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const verdict = yield* Deferred.make<boolean>();
+    const preparation = yield* Effect.forkChild(
+      prepareMastraCodeForm(
+        {
+          request: {
+            mode: "form",
+            message: "Value",
+            requestedSchema: { properties: { value: { type: "string", pattern: "^$" } } },
+          },
+          nativeRequestId: "preparation",
+          threadId: ThreadId.make("thread-1"),
+        },
+        (_, answer) =>
+          Effect.gen(function* () {
+            expect(answer).toBe("");
+            yield* Deferred.succeed(entered, undefined);
+            return yield* Deferred.await(verdict);
+          }),
+      ),
+    );
+    yield* Deferred.await(entered);
+    expect(preparation.pollUnsafe()).toBeUndefined();
+    yield* Deferred.succeed(verdict, true);
+    expect((yield* Fiber.join(preparation)).questions[0]?.allowEmptyAnswer).toBe(true);
+  }),
+);
+
+it.effect("keeps omission sentinel collision-safe and sends exactly omission", () =>
+  Effect.gen(function* () {
+    const prepared = yield* form({
+      properties: { tags: { type: "array", items: { enum: ["request-1:omit:tags", "x"] } } },
+    });
+    const skip = prepared.questions[0]!.options.find((option) => option.exclusive)!;
+    expect(skip.value).toBe("request-1:omit:tags:omit");
+    expect(yield* prepared.respond({ tags: [skip.value!] })).toEqual({
+      action: "accept",
+      content: {},
+    });
+    expect(yield* prepared.respond({ tags: ["request-1:omit:tags"] })).toEqual({
+      action: "accept",
+      content: { tags: ["request-1:omit:tags"] },
+    });
+  }),
+);
+
+it.effect("hides unknown empty eligibility while preserving literal replies", () =>
+  Effect.gen(function* () {
+    const prepared = yield* prepareMastraCodeForm(
+      {
+        request: {
+          mode: "form",
+          message: "Value",
+          requestedSchema: {
+            properties: { value: { type: "string", pattern: "^.*$" } },
+            required: ["value"],
+          },
+        },
+        nativeRequestId: "unknown-eligibility",
+        threadId: ThreadId.make("thread-1"),
+      },
+      (_, answer) =>
+        answer === ""
+          ? Effect.fail(AcpErrors.AcpRequestError.invalidParams("Validation unavailable"))
+          : Effect.succeed(true),
+    );
+    expect(prepared.questions[0]).toMatchObject({
+      answerFormat: "raw-string",
+      allowCustomAnswer: true,
+      allowEmptyAnswer: false,
+    });
+    expect(yield* prepared.respond({ value: " raw\n" })).toEqual({
+      action: "accept",
+      content: { value: " raw\n" },
+    });
+  }),
+);

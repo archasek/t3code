@@ -34,6 +34,7 @@
  */
 import {
   providerInstanceConfigEnabledFlag,
+  resolveProviderInstanceEnabled,
   ProviderInstanceId,
   type ProviderInstanceConfig,
   type ProviderInstanceConfigMap,
@@ -93,13 +94,15 @@ const entryEqual = (a: ProviderInstanceConfig, b: ProviderInstanceConfig): boole
  * files can carry both flags with conflicting values, and a user's disable
  * must never be silently undone. Otherwise the envelope flag wins, then the
  * decoded config's flag (which carries the driver schema's default for
- * built-ins and forks alike), then enabled by default.
+ * built-ins and forks alike), then enabled by default. Configured Mastra Code
+ * entries retain their historical default through the shared raw-envelope resolver.
  */
 const resolveEntryEnabled = (entry: ProviderInstanceConfig, typedConfig: unknown): boolean => {
   const rawConfigEnabled = providerInstanceConfigEnabledFlag(entry.config);
   if (entry.enabled === false || rawConfigEnabled === false) {
     return false;
   }
+  if (entry.driver === "mastraCode") return resolveProviderInstanceEnabled(entry);
   return entry.enabled ?? providerInstanceConfigEnabledFlag(typedConfig) ?? true;
 };
 

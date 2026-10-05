@@ -1222,6 +1222,7 @@ export function NewTaskDraftScreen(props: {
       resolveSelectableModelSelection(
         selectedEnvironmentServerConfig,
         draft.modelSelection ?? null,
+        flow.interactionMode,
       ) ?? flow.selectedModel;
     const workspaceMode = draft.workspaceSelection?.mode ?? flow.workspaceMode;
     const selectedBranchName = draft.workspaceSelection?.branch ?? flow.selectedBranchName;

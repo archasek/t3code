@@ -542,30 +542,39 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   // Antigravity keeps unavailable selections so sign-out or a catalog change
   // cannot switch the user's model. Other providers retain their fallback
   // rules. Implicit defaults also exclude legacy models for those providers.
+  const requestedModelInteractionMode = legacyPlanModeEnabled
+    ? (selectedProjectDraft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE)
+    : DEFAULT_PROVIDER_INTERACTION_MODE;
   const draftModelSelection = resolveSelectableModelSelection(
     selectedEnvironmentServerConfig,
     selectedProjectDraft.modelSelection ?? null,
+    requestedModelInteractionMode,
   );
   const projectDefaultModelSelection = resolveDefaultableModelSelection(
     selectedEnvironmentServerConfig,
     projectSettings.settings.defaultModelSelection,
+    requestedModelInteractionMode,
   );
   const storedStickyModelSelection = useStickyComposerModelSelection();
   const stickyModelSelection = resolveDefaultableModelSelection(
     selectedEnvironmentServerConfig,
     storedStickyModelSelection,
+    requestedModelInteractionMode,
   );
   const modelOptions = useMemo(
     () =>
       buildModelOptions(
         selectedEnvironmentServerConfig,
         draftModelSelection ?? projectDefaultModelSelection ?? stickyModelSelection,
+        undefined,
+        requestedModelInteractionMode,
       ),
     [
       selectedEnvironmentServerConfig,
       draftModelSelection,
       projectDefaultModelSelection,
       stickyModelSelection,
+      requestedModelInteractionMode,
     ],
   );
 
@@ -608,7 +617,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         return;
       }
       const option = modelOptions.find((candidate) => candidate.key === key);
-      if (!option) {
+      if (!option || (option.providerDriver === "mastraCode" && option.isUnavailable)) {
         return;
       }
       const selection = withRememberedModelOptions(
@@ -1081,6 +1090,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         resolveSelectableModelSelection(
           selectedEnvironmentServerConfig,
           draft.modelSelection ?? null,
+          interactionMode,
         ) ?? selectedModel;
       if (text.length === 0 || !draftModelSelection) {
         return null;
@@ -1151,6 +1161,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       defaultRuntimeMode,
       editingPendingProject,
       editingPendingTask,
+      interactionMode,
       selectedEnvironmentServerConfig,
       selectedModel,
       selectedProject,

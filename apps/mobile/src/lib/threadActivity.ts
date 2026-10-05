@@ -1,3 +1,7 @@
+import {
+  resolveRawUserInputAnswer,
+  toggleUserInputOption,
+} from "@t3tools/client-runtime/work-log/user-input";
 import type {
   ThreadPendingApproval,
   ThreadPendingUserInput,
@@ -359,11 +363,20 @@ function resolvePendingUserInputAnswer(
   draft: PendingUserInputDraftAnswer | undefined,
 ): string | ReadonlyArray<string> | null {
   if (draft?.attachmentsBlocked) return null;
+  if (
+    question.allowCustomAnswer !== false &&
+    question.answerFormat === "raw-string" &&
+    draft?.customAnswer !== undefined
+  ) {
+    return resolveRawUserInputAnswer(question, draft.customAnswer);
+  }
+  const attachmentOnlyAnswerAllowed =
+    question.answerFormat !== "raw-string" || question.allowEmptyAnswer === true;
   const customAnswer =
     question.allowCustomAnswer === false
       ? null
       : question.answerFormat === "raw-string"
-        ? (draft?.customAnswer ?? null)
+        ? resolveRawUserInputAnswer(question, draft?.customAnswer)
         : normalizeDraftAnswer(draft?.customAnswer);
   if (customAnswer !== null) {
     return customAnswer;
@@ -373,13 +386,19 @@ function resolvePendingUserInputAnswer(
   if (question.multiSelect) {
     return selectedOptionValues.length > 0
       ? selectedOptionValues
-      : question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0
+      : attachmentOnlyAnswerAllowed &&
+          question.allowCustomAnswer !== false &&
+          (draft?.attachmentCount ?? 0) > 0
         ? ""
         : null;
   }
   return (
     selectedOptionValues[0] ??
-    (question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0 ? "" : null)
+    (attachmentOnlyAnswerAllowed &&
+    question.allowCustomAnswer !== false &&
+    (draft?.attachmentCount ?? 0) > 0
+      ? ""
+      : null)
   );
 }
 
@@ -1616,9 +1635,11 @@ export function togglePendingUserInputOptionSelection(
       question,
       draft?.selectedOptionValues,
     );
-    const nextSelectedOptionValues = selectedOptionValues.includes(resolvedOptionValue)
-      ? selectedOptionValues.filter((value) => value !== resolvedOptionValue)
-      : [...selectedOptionValues, resolvedOptionValue];
+    const nextSelectedOptionValues = toggleUserInputOption(
+      question.options,
+      selectedOptionValues,
+      resolvedOptionValue,
+    );
 
     return {
       ...(question.answerFormat === "raw-string" ? {} : { customAnswer: "" }),

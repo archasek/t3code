@@ -154,6 +154,8 @@ instance can have its own environment variables, such as API keys or a custom
 base URL. Mark secret values as sensitive; after saving, T3 Code does not display
 their original values.
 
+For Mastra Code, see [Mastra Code setup](./providers-acp.md#mastra-code-setup).
+
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 [Claude](./providers-claude.md), [OpenCode](./providers-opencode.md),
 [Antigravity](./providers-antigravity.md), and [Pi](./providers-pi.md).

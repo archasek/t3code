@@ -54,15 +54,28 @@ const nativeChoiceQuestion = {
 } as const;
 
 describe("resolvePendingUserInputAnswer", () => {
-  it.each(["", "  ", " padded ", "first\nsecond\n"])("preserves raw MC answer %j", (customAnswer) => {
-    const question = { ...singleSelectQuestion, answerFormat: "raw-string" as const };
-    expect(resolvePendingUserInputAnswer(question, undefined)).toBeNull();
-    const draft = setPendingUserInputCustomAnswer({ selectedOptionValues: ["Orchestration-first"] }, customAnswer, question);
-    expect(resolvePendingUserInputAnswer(question, draft)).toBe(customAnswer);
-    expect(derivePendingUserInputProgress([question], { scope: draft }, 0).usingCustomAnswer).toBe(true);
-    const option = togglePendingUserInputOptionSelection(question, draft, "Orchestration-first");
-    expect(resolvePendingUserInputAnswer(question, option)).toBe("Orchestration-first");
-  });
+  it.each(["", "  ", " padded ", "first\nsecond\n"])(
+    "preserves raw MC answer %j",
+    (customAnswer) => {
+      const question = {
+        ...singleSelectQuestion,
+        answerFormat: "raw-string" as const,
+        allowEmptyAnswer: true,
+      };
+      expect(resolvePendingUserInputAnswer(question, undefined)).toBeNull();
+      const draft = setPendingUserInputCustomAnswer(
+        { selectedOptionValues: ["Orchestration-first"] },
+        customAnswer,
+        question,
+      );
+      expect(resolvePendingUserInputAnswer(question, draft)).toBe(customAnswer);
+      expect(
+        derivePendingUserInputProgress([question], { scope: draft }, 0).usingCustomAnswer,
+      ).toBe(true);
+      const option = togglePendingUserInputOptionSelection(question, draft, "Orchestration-first");
+      expect(resolvePendingUserInputAnswer(question, option)).toBe("Orchestration-first");
+    },
+  );
   it("prefers a custom answer over selected options", () => {
     expect(
       resolvePendingUserInputAnswer(singleSelectQuestion, {
@@ -373,4 +386,51 @@ describe("carryDisplacedCustomAnswerIntoPrompt", () => {
       "first half\n\nsecond half",
     );
   });
+});
+
+it.each([false, undefined, true])(
+  "only completes raw empty text with established eligibility (%s)",
+  (allowEmptyAnswer) => {
+    const question = {
+      ...singleSelectQuestion,
+      answerFormat: "raw-string" as const,
+      allowEmptyAnswer,
+    };
+    const draft = setPendingUserInputCustomAnswer(undefined, "", question);
+    expect(buildPendingUserInputAnswers([question], { [question.id]: draft })).toEqual(
+      allowEmptyAnswer ? { [question.id]: "" } : null,
+    );
+    expect(resolvePendingUserInputAnswer(question, { customAnswer: "  " })).toBe("  ");
+    if (allowEmptyAnswer !== true) {
+      expect(
+        resolvePendingUserInputAnswer(question, {
+          customAnswer: "",
+          selectedOptionValues: ["Orchestration-first"],
+          attachmentCount: 1,
+        }),
+      ).toBeNull();
+      expect(resolvePendingUserInputAnswer(question, { attachmentCount: 1 })).toBeNull();
+    }
+  },
+);
+
+it("keeps omission exclusive in the web answer and preserves ordinary multi-select", () => {
+  const question = {
+    ...multiSelectQuestion,
+    options: [
+      { label: "First", description: "", value: "a" },
+      { label: "Second", description: "", value: "b" },
+      { label: "Leave unset", description: "", value: "collision-safe-omit", exclusive: true },
+    ],
+  };
+  let draft = togglePendingUserInputOptionSelection(question, undefined, "a");
+  draft = togglePendingUserInputOptionSelection(question, draft, "b");
+  expect(resolvePendingUserInputAnswer(question, draft)).toEqual(["a", "b"]);
+  draft = togglePendingUserInputOptionSelection(question, draft, "collision-safe-omit");
+  expect(resolvePendingUserInputAnswer(question, draft)).toEqual(["collision-safe-omit"]);
+  draft = togglePendingUserInputOptionSelection(question, draft, "a");
+  expect(resolvePendingUserInputAnswer(question, draft)).toEqual(["a"]);
+  draft = togglePendingUserInputOptionSelection(question, draft, "collision-safe-omit");
+  draft = togglePendingUserInputOptionSelection(question, draft, "collision-safe-omit");
+  expect(resolvePendingUserInputAnswer(question, draft)).toBeNull();
 });

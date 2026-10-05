@@ -13,6 +13,25 @@ configuration, compaction, and agent-terminal updates when the agent supports th
 negotiates ACP v1 for Registry agents that have not migrated yet, so agents such as Pi continue to
 work through the same generic integration.
 
+## Mastra Code setup
+
+Mastra Code is a built-in provider with an experimental ACP connection. Use a Mastra Code CLI
+that supports `--acp` and `info --json`. Install or build that CLI on the machine running your
+T3 Code server, then open **Settings → Providers → Mastra Code**, enable it, and set **Binary path**
+to `mastracode` on the server's PATH or the full path to its executable.
+
+The CLI runs on the server for web, desktop, and mobile connections. When connected to a remote
+HQ server, install it on HQ; a Windows executable on your local computer cannot run on that
+server. A desktop app hosting its own server uses the CLI on that desktop machine.
+
+Choose **Sign in** in provider setup and use your ChatGPT account. You can use the same account
+as direct Codex, but Mastra Code owns a separate credential store and refreshes its own tokens.
+Do not copy tokens between providers. After login, T3 Code automatically refreshes the provider
+status and model catalog. Choose a model available in the current Build or Plan mode.
+
+Experimental ACP currently supports regular agents only. Native Mastra Code subagent and
+parallel-agent behavior is not available through this connection.
+
 ## Add an agent
 
 1. Open **Settings → Providers**.

@@ -207,16 +207,24 @@ it.layer(NodeServices.layer)("checkMastraCodeProviderStatus", (it) => {
               { id: "model-plan-only", modes: ["plan"] },
               { id: "model-build-first", modes: ["build", "plan"] },
               { id: "model-build-second", modes: ["build"] },
+              { id: "model-unconstrained" },
             ],
           },
           0,
         );
         const snapshot = yield* buildStatus(binaryPath);
 
+        expect(snapshot.models.map((model) => model.supportedInteractionModes)).toEqual([
+          ["plan"],
+          ["default", "plan"],
+          ["default"],
+          undefined,
+        ]);
         expect(snapshot.models.map(({ slug, isDefault }) => [slug, isDefault ?? false])).toEqual([
           ["model-plan-only", false],
           ["model-build-first", true],
           ["model-build-second", false],
+          ["model-unconstrained", false],
         ]);
       }),
     ),

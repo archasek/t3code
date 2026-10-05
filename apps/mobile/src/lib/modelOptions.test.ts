@@ -504,3 +504,78 @@ describe("mobile model options", () => {
     ).toBeNull();
   });
 });
+
+it("mobile switches incompatible MC selections safely and excludes custom/stale bypasses", () => {
+  const instanceId = ProviderInstanceId.make("mastraCode");
+  const config = {
+    providers: [
+      {
+        instanceId,
+        driver: "mastraCode",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated" },
+        models: [
+          {
+            slug: "build",
+            name: "Build",
+            isCustom: false,
+            isDefault: true,
+            capabilities: null,
+            supportedInteractionModes: ["default"],
+          },
+          {
+            slug: "plan",
+            name: "Plan",
+            isCustom: false,
+            capabilities: null,
+            supportedInteractionModes: ["plan"],
+          },
+          {
+            slug: "both",
+            name: "Both",
+            isCustom: false,
+            capabilities: null,
+            supportedInteractionModes: ["default", "plan"],
+          },
+          { slug: "absent", name: "Absent metadata", isCustom: false, capabilities: null },
+          { slug: "custom", name: "Custom", isCustom: true, capabilities: null },
+        ],
+      },
+    ],
+  } as unknown as ServerConfig;
+  expect(
+    resolveSelectableModelSelection(
+      config,
+      { instanceId, model: "build", options: [{ id: "old", value: "old" }] },
+      "plan",
+    ),
+  ).toEqual({ instanceId, model: "plan" });
+  expect(resolveSelectableModelSelection(config, { instanceId, model: "plan" }, "default")).toEqual(
+    { instanceId, model: "build" },
+  );
+  expect(
+    buildModelOptions(config, { instanceId, model: "custom" }, undefined, "plan")
+      .filter((model) => !model.isUnavailable)
+      .map((model) => model.selection.model),
+  ).toEqual(["plan", "both", "absent"]);
+  expect(
+    buildModelOptions(config, { instanceId, model: "stale" }, undefined, "default")
+      .filter((model) => !model.isUnavailable)
+      .map((model) => model.selection.model),
+  ).toEqual(["build", "both", "absent"]);
+  const buildRow = buildModelOptions(config, null, undefined, "plan").find(
+    (model) => model.selection.model === "build",
+  );
+  expect(buildRow).toMatchObject({ isUnavailable: true, subtitle: "Available in Build mode." });
+  const planOnly = {
+    ...config,
+    providers: config.providers.map((provider) => ({
+      ...provider,
+      models: provider.models.filter((model) => model.slug === "plan"),
+    })),
+  };
+  expect(
+    resolveSelectableModelSelection(planOnly, { instanceId, model: "plan" }, "default"),
+  ).toBeNull();
+});

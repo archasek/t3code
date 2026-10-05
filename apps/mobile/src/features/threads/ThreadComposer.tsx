@@ -648,8 +648,19 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     ? undefined
     : currentModelSelection.instanceId;
   const modelOptions = useMemo(
-    () => buildModelOptions(props.serverConfig, currentModelSelection, lockedProviderInstanceId),
-    [props.serverConfig, currentModelSelection, lockedProviderInstanceId],
+    () =>
+      buildModelOptions(
+        props.serverConfig,
+        currentModelSelection,
+        lockedProviderInstanceId,
+        props.selectedThread.interactionMode,
+      ),
+    [
+      props.serverConfig,
+      currentModelSelection,
+      lockedProviderInstanceId,
+      props.selectedThread.interactionMode,
+    ],
   );
   const threadProviderGroups = useMemo(() => groupByProvider(modelOptions), [modelOptions]);
   const currentModelOption =
@@ -675,8 +686,10 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       providerGroups: threadProviderGroups,
       selectedModel: currentModelSelection,
       reportedModelSelection: props.reportedModelSelection,
-      onSelectModel: (option) =>
-        props.onUpdateModelSelection(withRememberedModelOptions(option.selection)),
+      onSelectModel: (option) => {
+        if (option.providerDriver !== "mastraCode" || !option.isUnavailable)
+          props.onUpdateModelSelection(withRememberedModelOptions(option.selection));
+      },
       optionDescriptors: providerOptionDescriptors,
       onUpdateOptionSelections: (options) => {
         rememberModelOptions(

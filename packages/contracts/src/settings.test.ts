@@ -25,17 +25,30 @@ describe("Mastra Code executable settings", () => {
   const decode = Schema.decodeUnknownSync(MastraCodeSettings);
   it("round-trips opt-in server settings and accepts provider patches", () => {
     expect(decodeServerSettings({}).providers.mastraCode.enabled).toBe(false);
-    const patch = { providers: { mastraCode: { enabled: true, binaryPath: "/opt/mastra/mastracode" } } };
+    const patch = {
+      providers: { mastraCode: { enabled: true, binaryPath: "/opt/mastra/mastracode" } },
+    };
     expect(decodeServerSettingsPatch(patch)).toEqual(patch);
     expect(encodeServerSettings(decodeServerSettings(patch))).toMatchObject(patch);
   });
   it("is opt-in and defaults to the native CLI", () => {
     expect(decode({})).toMatchObject({ enabled: false, binaryPath: "mastracode" });
   });
-  it.each(["mastracode", "/opt/mastra/bin/mastracode", "C:\\Mastra\\mastracode.exe", "\\\\server\\share\\mastracode.exe"])("accepts %s", (binaryPath) => {
+  it.each([
+    "mastracode",
+    "/opt/mastra/bin/mastracode",
+    "C:\\Mastra\\mastracode.exe",
+    "\\\\server\\share\\mastracode.exe",
+  ])("accepts %s", (binaryPath) => {
     expect(decode({ binaryPath }).binaryPath).toBe(binaryPath);
   });
-  it.each(["./mastracode", "..\\mastracode.exe", "C:mastracode.exe", "\\\\workspace", "\\\\.\\pipe\\mastracode.exe"])("rejects workspace-relative or device path %s", (binaryPath) => {
+  it.each([
+    "./mastracode",
+    "..\\mastracode.exe",
+    "C:mastracode.exe",
+    "\\\\workspace",
+    "\\\\.\\pipe\\mastracode.exe",
+  ])("rejects workspace-relative or device path %s", (binaryPath) => {
     expect(() => decode({ binaryPath })).toThrow();
   });
 });
@@ -1124,4 +1137,31 @@ describe("branch naming settings", () => {
       expect(decodeServerSettingsPatch(input)).toEqual(input);
     },
   );
+});
+
+it("keeps pre-upgrade configured MC instances enabled without overriding either disable flag", () => {
+  const id = ProviderInstanceId.make("mastra-existing");
+  for (const flags of [
+    {},
+    { enabled: false },
+    { config: { enabled: false } },
+    { enabled: true, config: { enabled: false } },
+    { enabled: false, config: { enabled: true } },
+  ]) {
+    const settings = decodeServerSettings({
+      providerInstances: { [id]: { driver: "mastraCode", config: {}, ...flags } },
+    });
+    const instance = settings.providerInstances[id]!;
+    expect(resolveProviderInstanceEnabled(instance)).toBe(
+      !("enabled" in flags) && !("config" in flags),
+    );
+    const roundTrip = decodeServerSettings(encodeServerSettings(settings));
+    expect(resolveProviderInstanceEnabled(roundTrip.providerInstances[id]!)).toBe(
+      resolveProviderInstanceEnabled(instance),
+    );
+  }
+  const fresh = decodeServerSettings({});
+  expect(fresh.providers.mastraCode.enabled).toBe(false);
+  expect(fresh.providerInstances).toEqual({});
+  expect(fresh.providers.codex.enabled).toBe(DEFAULT_SERVER_SETTINGS.providers.codex.enabled);
 });

@@ -20,7 +20,9 @@ const common = {
   description: Schema.optional(Schema.NullOr(Schema.String)),
 };
 const propertySchema = Schema.Union([
-  Schema.Struct({ ...common, type: Schema.Literal("string"),
+  Schema.Struct({
+    ...common,
+    type: Schema.Literal("string"),
     enum: Schema.optional(Schema.NullOr(Schema.Array(Schema.String))),
     oneOf: Schema.optional(Schema.NullOr(Schema.Array(enumOption))),
     minLength: Schema.optional(Schema.NullOr(Schema.Number)),
@@ -28,15 +30,24 @@ const propertySchema = Schema.Union([
     pattern: Schema.optional(Schema.NullOr(Schema.String)),
     format: Schema.optional(Schema.NullOr(Schema.Literals(["email", "uri", "date", "date-time"]))),
   }),
-  Schema.Struct({ ...common, type: Schema.Literal("number"),
-    minimum: Schema.optional(Schema.NullOr(Schema.Number)), maximum: Schema.optional(Schema.NullOr(Schema.Number)),
+  Schema.Struct({
+    ...common,
+    type: Schema.Literal("number"),
+    minimum: Schema.optional(Schema.NullOr(Schema.Number)),
+    maximum: Schema.optional(Schema.NullOr(Schema.Number)),
   }),
-  Schema.Struct({ ...common, type: Schema.Literal("integer"),
-    minimum: Schema.optional(Schema.NullOr(Schema.Number)), maximum: Schema.optional(Schema.NullOr(Schema.Number)),
+  Schema.Struct({
+    ...common,
+    type: Schema.Literal("integer"),
+    minimum: Schema.optional(Schema.NullOr(Schema.Number)),
+    maximum: Schema.optional(Schema.NullOr(Schema.Number)),
   }),
   Schema.Struct({ ...common, type: Schema.Literal("boolean") }),
-  Schema.Struct({ ...common, type: Schema.Literal("array"),
-    minItems: Schema.optional(Schema.NullOr(Schema.Number)), maxItems: Schema.optional(Schema.NullOr(Schema.Number)),
+  Schema.Struct({
+    ...common,
+    type: Schema.Literal("array"),
+    minItems: Schema.optional(Schema.NullOr(Schema.Number)),
+    maxItems: Schema.optional(Schema.NullOr(Schema.Number)),
     items: Schema.Union([
       Schema.Struct({ enum: Schema.Array(Schema.String) }),
       Schema.Struct({ anyOf: Schema.Array(enumOption) }),
@@ -69,11 +80,7 @@ function elicitationEnumValues(property: FormProperty) {
   return elicitationEnumOptions(property)?.map((option) => option.value);
 }
 
-function optionalElicitationSkipValue(
-  property: FormProperty,
-  requestId: string,
-  id: string,
-) {
+function optionalElicitationSkipValue(property: FormProperty, requestId: string, id: string) {
   let value = `${requestId}:omit:${id}`;
   const allowed = elicitationEnumValues(property);
   while (allowed?.includes(value)) value += ":omit";
@@ -125,7 +132,7 @@ function coerceMastraCodeElicitationAnswer(
 function elicitationQuestions(
   request: { readonly message: string; readonly requestedSchema: typeof formSchema.Type },
   requestId: string,
-) {
+): OrchestrationV2UserInputQuestion[] {
   const properties = request.requestedSchema.properties ?? {};
   const required = new Set(request.requestedSchema.required ?? []);
   if (Object.keys(properties).length === 0) {
@@ -149,7 +156,12 @@ function elicitationQuestions(
   }
   return Object.entries(properties).map(([id, property]) => {
     const enumOptions = elicitationEnumOptions(property);
-    const options =
+    const options: Array<{
+      label: string;
+      description: string;
+      value: string;
+      exclusive?: boolean;
+    }> =
       enumOptions?.map(({ value, label }) => ({
         label,
         description: text(property.description) ?? "Choose a value.",
@@ -160,6 +172,7 @@ function elicitationQuestions(
         label: "Leave unset",
         description: "Optional field; do not send a value.",
         value: optionalElicitationSkipValue(property, requestId, id),
+        exclusive: true,
       });
     return {
       id,
@@ -175,7 +188,6 @@ function elicitationQuestions(
   });
 }
 
-
 const decodeForm = Schema.decodeUnknownOption(formSchema);
 
 export function prepareMastraCodeForm(
@@ -185,51 +197,72 @@ export function prepareMastraCodeForm(
     answer: ElicitationValue,
   ) => Effect.Effect<boolean, EffectAcpErrors.AcpError>,
 ): ReturnType<NonNullable<AcpAdapterV2Flavor["prepareFormElicitation"]>> {
-  const decoded = decodeForm(input.request.requestedSchema);
-  const candidate = Option.getOrUndefined(decoded);
-  const supported = candidate !== undefined && Object.values(candidate.properties ?? {}).every(
-    (property) => ["string", "number", "integer", "boolean", "array"].includes(property.type),
-  );
-  const schema = supported ? candidate : undefined;
-  const request = { message: input.request.message, requestedSchema: schema ?? {} };
-  const questions: ReadonlyArray<OrchestrationV2UserInputQuestion> =
-    elicitationQuestions(request, input.nativeRequestId);
-  return {
-    questions,
-    respond: (answers) => Effect.gen(function* () {
-      if (schema === undefined || answers === null) return { action: "cancel" } as const;
-      const properties = schema.properties ?? {};
-      if (Object.keys(properties).length === 0) {
-        const submitted = answers[EMPTY_FORM_CONFIRMATION_ID];
-        const confirmation = Array.isArray(submitted) && submitted.length === 1 ? submitted[0] : submitted;
-        return confirmation === "accept"
-          ? { action: "accept", content: {} } as const
-          : { action: confirmation === "decline" ? "decline" : "cancel" } as const;
-      }
-      const content: Record<string, ElicitationValue> = {};
-      for (const [key, submitted] of Object.entries(answers)) {
-        if (!Object.hasOwn(properties, key)) continue;
-        const property = properties[key]!;
-        if (!schema.required?.includes(key)) {
-          const skip = optionalElicitationSkipValue(property, input.nativeRequestId, key);
-          if (submitted === skip || (Array.isArray(submitted) && submitted.includes(skip))) {
-            if (Array.isArray(submitted) && submitted.length !== 1) return { action: "cancel" } as const;
-            continue;
+  return Effect.gen(function* () {
+    const decoded = decodeForm(input.request.requestedSchema);
+    const candidate = Option.getOrUndefined(decoded);
+    const supported =
+      candidate !== undefined &&
+      Object.values(candidate.properties ?? {}).every((property) =>
+        ["string", "number", "integer", "boolean", "array"].includes(property.type),
+      );
+    const schema = supported ? candidate : undefined;
+    const request = { message: input.request.message, requestedSchema: schema ?? {} };
+    const questions: OrchestrationV2UserInputQuestion[] = [];
+    for (const question of elicitationQuestions(request, input.nativeRequestId)) {
+      const property = schema?.properties?.[question.id];
+      const allowEmptyAnswer =
+        question.answerFormat === "raw-string" &&
+        property?.type === "string" &&
+        coerceMastraCodeElicitationAnswer(property, "") !== undefined &&
+        (yield* validateString(property, "").pipe(Effect.orElseSucceed(() => false)));
+      questions.push({
+        ...question,
+        ...(question.answerFormat === "raw-string" ? { allowEmptyAnswer } : {}),
+      });
+    }
+    return {
+      questions,
+      respond: (answers) =>
+        Effect.gen(function* () {
+          if (schema === undefined || answers === null) return { action: "cancel" } as const;
+          const properties = schema.properties ?? {};
+          if (Object.keys(properties).length === 0) {
+            const submitted = answers[EMPTY_FORM_CONFIRMATION_ID];
+            const confirmation =
+              Array.isArray(submitted) && submitted.length === 1 ? submitted[0] : submitted;
+            return confirmation === "accept"
+              ? ({ action: "accept", content: {} } as const)
+              : ({ action: confirmation === "decline" ? "decline" : "cancel" } as const);
           }
-        }
-        const value = property.type !== "array" && Array.isArray(submitted)
-          ? submitted.length === 1 ? submitted[0] : undefined
-          : submitted;
-        const coerced = coerceMastraCodeElicitationAnswer(property, value);
-        if (coerced === undefined || !(yield* validateString(property, coerced))) {
-          return { action: "cancel" } as const;
-        }
-        content[key] = coerced;
-      }
-      if (schema.required?.some((key) => !Object.hasOwn(content, key))) {
-        return { action: "cancel" } as const;
-      }
-      return { action: "accept", content } as const;
-    }),
-  };
+          const content: Record<string, ElicitationValue> = {};
+          for (const [key, submitted] of Object.entries(answers)) {
+            if (!Object.hasOwn(properties, key)) continue;
+            const property = properties[key]!;
+            if (!schema.required?.includes(key)) {
+              const skip = optionalElicitationSkipValue(property, input.nativeRequestId, key);
+              if (submitted === skip || (Array.isArray(submitted) && submitted.includes(skip))) {
+                if (Array.isArray(submitted) && submitted.length !== 1)
+                  return { action: "cancel" } as const;
+                continue;
+              }
+            }
+            const value =
+              property.type !== "array" && Array.isArray(submitted)
+                ? submitted.length === 1
+                  ? submitted[0]
+                  : undefined
+                : submitted;
+            const coerced = coerceMastraCodeElicitationAnswer(property, value);
+            if (coerced === undefined || !(yield* validateString(property, coerced))) {
+              return { action: "cancel" } as const;
+            }
+            content[key] = coerced;
+          }
+          if (schema.required?.some((key) => !Object.hasOwn(content, key))) {
+            return { action: "cancel" } as const;
+          }
+          return { action: "accept", content } as const;
+        }),
+    };
+  });
 }

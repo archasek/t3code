@@ -14,6 +14,7 @@ import {
   validateMastraCodeStringConstraints,
 } from "../../provider/MastraCodeElicitationValidation.ts";
 import { readMastraCodePlan } from "../../provider/MastraCodePlan.ts";
+import { checkMastraCodeProviderStatus } from "../../provider/Layers/MastraCodeProvider.ts";
 import { applyMastraCodeModelSelection } from "../../provider/MastraCodeModelSelection.ts";
 import { acpPermissionDisposition, unknownRecord } from "../../provider/acp/AcpClientPolicy.ts";
 import {
@@ -68,7 +69,22 @@ export function makeMastraCodeAdapterV2(options: MastraCodeAdapterV2Options) {
       ? {}
       : { onAvailableCommandsUpdate: options.onAvailableCommands }),
     resolveModelId: (selection) => (selection.model === "default" ? undefined : selection.model),
-    applyModelSelection: applyMastraCodeModelSelection,
+    applyModelSelection: (input) =>
+      Effect.gen(function* () {
+        // Setup-time ACP model lists omit native mode constraints. Qualify the
+        // running binary's catalog before applying an explicit model per mode.
+        if (["default", "auto", ""].includes(input.modelSelection.model)) return undefined;
+        const catalog = yield* checkMastraCodeProviderStatus(
+          options.settings,
+          options.environment,
+        ).pipe(
+          Effect.provideService(
+            ChildProcessSpawner.ChildProcessSpawner,
+            options.childProcessSpawner,
+          ),
+        );
+        return yield* applyMastraCodeModelSelection({ ...input, models: catalog.models });
+      }),
     sessionModeForPolicy: (policy) => (policy.interactionMode === "plan" ? "plan" : "build"),
     permissionDisposition: (policy, request) =>
       request.toolCall.title?.trim() === "submit_plan"
@@ -124,29 +140,25 @@ export function makeMastraCodeAdapterV2(options: MastraCodeAdapterV2Options) {
           directory,
           options.path.join(directory, "plans"),
         ]) {
-          yield* options.fileSystem
-            .makeDirectory(target, { recursive: true, mode: 0o700 })
-            .pipe(
+          yield* options.fileSystem.makeDirectory(target, { recursive: true, mode: 0o700 }).pipe(
+            Effect.mapError(
+              (cause) =>
+                new AcpErrors.AcpTransportError({
+                  detail: "Mastra Code thread storage creation failed",
+                  cause,
+                }),
+            ),
+          );
+          if (options.platform !== "win32")
+            yield* options.fileSystem.chmod(target, 0o700).pipe(
               Effect.mapError(
                 (cause) =>
                   new AcpErrors.AcpTransportError({
-                    detail: "Mastra Code thread storage creation failed",
+                    detail: "Mastra Code thread storage permissions failed",
                     cause,
                   }),
               ),
             );
-          if (options.platform !== "win32")
-            yield* options.fileSystem
-              .chmod(target, 0o700)
-              .pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new AcpErrors.AcpTransportError({
-                      detail: "Mastra Code thread storage permissions failed",
-                      cause,
-                    }),
-                ),
-              );
         }
         const environment = withMastraCodeThreadStorage(
           { ...options.environment, ...input.processEnvironment },

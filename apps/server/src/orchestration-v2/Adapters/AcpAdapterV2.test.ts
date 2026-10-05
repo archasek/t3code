@@ -2651,7 +2651,17 @@ describe("AcpAdapterV2", () => {
                 supportsModelSwitchInSession: true,
               },
             },
-            applyModelSelection: applyMastraCodeModelSelection,
+            applyModelSelection: (input) =>
+              applyMastraCodeModelSelection({
+                ...input,
+                models: ["model-a", "model-b"].map((slug) => ({
+                  slug,
+                  name: slug,
+                  isCustom: false,
+                  capabilities: null,
+                  supportedInteractionModes: slug === "model-a" ? ["default"] : ["plan"],
+                })),
+              }),
             sessionModeForPolicy: (policy) =>
               policy.interactionMode === "plan" ? "plan" : "build",
             makeRuntime: makeMockRuntime({
@@ -4685,10 +4695,12 @@ describe("AcpAdapterV2", () => {
               ),
             prepareFormElicitation: (input) =>
               prepareMastraCodeForm(input, (property, answer) =>
-                validateMastraCodeStringConstraints(property, answer).pipe(
-                  Effect.provideService(Path.Path, path),
-                  Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, workerSpawner),
-                ),
+                answer === ""
+                  ? Effect.succeed(false)
+                  : validateMastraCodeStringConstraints(property, answer).pipe(
+                      Effect.provideService(Path.Path, path),
+                      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, workerSpawner),
+                    ),
               ),
             makeRuntime: mockRuntime,
           },
@@ -5007,7 +5019,7 @@ describe("AcpAdapterV2", () => {
             Effect.succeed(Deferred.succeed(formLeaseReleased, undefined).pipe(Effect.asVoid)),
           prepareFormElicitation: ({ threadId }) => {
             assert.equal(threadId, ThreadId.make("thread-acp-reordered-elicitation"));
-            return {
+            return Effect.succeed({
               questions: [
                 {
                   id: "approved",
@@ -5032,7 +5044,7 @@ describe("AcpAdapterV2", () => {
                         },
                       };
                 }),
-            };
+            });
           },
           makeRuntime: makeMockRuntime({
             childProcessSpawner,

@@ -1,3 +1,4 @@
+import { resolveInteractionModeModel } from "@t3tools/shared/model";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { runtimeModeConfig, runtimeModeOptions as runtimeModes } from "./runtimeModeConfig";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
@@ -1657,6 +1658,7 @@ export interface ChatComposerProps {
     nextCursor: number,
     expandedCursor: number,
     cursorAdjacentToMention: boolean,
+    origin?: "literal-input",
   ) => void;
 
   onProviderModelSelect: (
@@ -2144,19 +2146,33 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ? runtimeMode
     : (compatibleRuntimeModeOptions[0]?.mode ?? runtimeMode);
 
-  const { modelOptions: composerModelOptions, selectedModel } = useEffectiveComposerModelState({
-    threadRef: composerDraftTarget,
-    providers: providerStatuses,
-    selectedProvider,
-    selectedInstanceId,
-    threadModelSelection: activeThreadModelSelection,
-    projectModelSelection: activeProjectDefaultModelSelection,
-    settings,
+  const { enabled: planModeUiEnabled, interactionMode } = resolveComposerInteractionMode({
+    planModeEnabled: settings.planModeEnabled,
+    provider: selectedProviderEntry?.snapshot ?? null,
+    interactionMode: requestedInteractionMode,
   });
-  const providerSendBlockReason = getAntigravitySendBlockReason(
-    selectedProviderEntry?.snapshot,
-    selectedModel,
-  );
+  const { modelOptions: composerModelOptions, selectedModel: storedSelectedModel } =
+    useEffectiveComposerModelState({
+      threadRef: composerDraftTarget,
+      providers: providerStatuses,
+      selectedProvider,
+      selectedInstanceId,
+      threadModelSelection: activeThreadModelSelection,
+      projectModelSelection: activeProjectDefaultModelSelection,
+      settings,
+    });
+  const selectedModel =
+    selectedProvider === "mastraCode"
+      ? (resolveInteractionModeModel(
+          (selectedProviderEntry?.models ?? []).filter((model) => !model.isCustom),
+          storedSelectedModel,
+          interactionMode,
+        ) ?? "")
+      : storedSelectedModel;
+  const providerSendBlockReason =
+    selectedProvider === "mastraCode" && !selectedModel
+      ? "Choose a model available in this mode."
+      : getAntigravitySendBlockReason(selectedProviderEntry?.snapshot, selectedModel);
   const sendDisabledReason =
     externalSendDisabledReason ??
     (multipleModelSelections?.length === 0 ? "Select at least one model." : null) ??
@@ -2299,11 +2315,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const selectedPromptEffort = composerProviderState.promptEffort;
   const selectedModelOptionsForDispatch = composerProviderState.modelOptionsForDispatch;
-  const { enabled: planModeUiEnabled, interactionMode } = resolveComposerInteractionMode({
-    planModeEnabled: settings.planModeEnabled,
-    provider: selectedProviderStatus,
-    interactionMode: requestedInteractionMode,
-  });
+
   const selectedModelSelection = useMemo<ModelSelection>(
     () => createModelSelection(selectedInstanceId, selectedModel, selectedModelOptionsForDispatch),
     [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
@@ -6669,6 +6681,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                         value.length,
                         value.length,
                         false,
+                        "literal-input",
                       )
                     }
                     onAdvance={onAdvanceActivePendingUserInput}
@@ -6698,6 +6711,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           value.length,
                           value.length,
                           false,
+                          "literal-input",
                         )
                       }
                       onAdvance={onAdvanceActivePendingUserInput}

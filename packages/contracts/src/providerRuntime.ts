@@ -482,6 +482,7 @@ const UserInputQuestionOption = Schema.Struct({
   label: TrimmedNonEmptyStringSchema,
   description: Schema.String,
   value: Schema.optional(Schema.String),
+  exclusive: Schema.optional(Schema.Boolean),
 });
 export type UserInputQuestionOption = typeof UserInputQuestionOption.Type;
 
@@ -492,6 +493,7 @@ export const UserInputQuestion = Schema.Struct({
   options: Schema.Array(UserInputQuestionOption),
   allowCustomAnswer: Schema.optional(Schema.Boolean),
   answerFormat: Schema.optional(Schema.Literal("raw-string")),
+  allowEmptyAnswer: Schema.optional(Schema.Boolean),
   multiSelect: Schema.optional(Schema.Boolean).pipe(
     Schema.withConstructorDefault(Effect.succeed(false)),
   ),

@@ -1,3 +1,4 @@
+import { modelSupportsInteractionMode } from "@t3tools/shared/model";
 import { ChatCanvas } from "./chat/ChatCanvas";
 import { usageLimitRecoveryBannerItem } from "./chat/UsageLimitRecoveryBanner";
 import {
@@ -205,6 +206,7 @@ import {
   carryDisplacedCustomAnswerIntoPrompt,
   derivePendingUserInputProgress,
   setPendingUserInputCustomAnswer,
+  synchronizePendingUserInputCursor,
   togglePendingUserInputOptionSelection,
   type PendingUserInputDraftAnswer,
 } from "../pendingUserInput";
@@ -9873,6 +9875,7 @@ export default function ChatView(props: ChatViewProps) {
       nextCursor: number,
       expandedCursor: number,
       _cursorAdjacentToMention: boolean,
+      origin?: "literal-input",
     ) => {
       if (!activePendingUserInput) {
         return;
@@ -9893,14 +9896,13 @@ export default function ChatView(props: ChatViewProps) {
           ),
         },
       }));
-      const snapshot = composerRef.current?.readSnapshot();
-      if (
-        snapshot?.value !== value ||
-        snapshot.cursor !== nextCursor ||
-        snapshot.expandedCursor !== expandedCursor
-      ) {
-        composerRef.current?.focusAt(nextCursor);
-      }
+      synchronizePendingUserInputCursor(
+        composerRef.current,
+        value,
+        nextCursor,
+        expandedCursor,
+        origin,
+      );
     },
     [activePendingUserInput, activePendingRequestKey, composerRef],
   );
@@ -10236,6 +10238,16 @@ export default function ChatView(props: ChatViewProps) {
 
   const getModelDisabledReason = useCallback(
     (instanceId: ProviderInstanceId, model: string): string | null => {
+      const provider = providerStatuses.find((entry) => entry.instanceId === instanceId);
+      const catalogModel = provider?.models.find(
+        (entry) => entry.slug === model && !entry.isCustom,
+      );
+      if (
+        provider?.driver === "mastraCode" &&
+        (!catalogModel || !modelSupportsInteractionMode(catalogModel, interactionMode))
+      ) {
+        return "This model is unavailable in the current mode.";
+      }
       if (!activeThread) {
         return null;
       }
@@ -10249,7 +10261,13 @@ export default function ChatView(props: ChatViewProps) {
       });
       return reason ? `${reason.description} Start a new thread to use this model.` : null;
     },
-    [activeRuntime, activeThread, providerStatuses, supportsProviderSwitchingViaHandoff],
+    [
+      activeRuntime,
+      activeThread,
+      providerStatuses,
+      supportsProviderSwitchingViaHandoff,
+      interactionMode,
+    ],
   );
 
   const onProviderModelSelect = useCallback(
@@ -10260,6 +10278,7 @@ export default function ChatView(props: ChatViewProps) {
       // are rejected by returning early; the server remains authoritative too.
       const entry = providerStatuses.find((snapshot) => snapshot.instanceId === instanceId);
       const resolvedDriverKind = entry?.driver ?? null;
+      if (resolvedDriverKind === "mastraCode" && getModelDisabledReason(instanceId, model)) return;
       if (
         !supportsProviderSwitchingViaHandoff &&
         lockedProvider !== null &&
@@ -10291,6 +10310,7 @@ export default function ChatView(props: ChatViewProps) {
         settings,
         providerStatuses,
         model,
+        { interactionMode },
       );
       if (!resolvedModel) {
         if (options?.focusComposer !== false) scheduleComposerFocus();
@@ -10343,6 +10363,8 @@ export default function ChatView(props: ChatViewProps) {
       setStickyComposerModelSelection,
       providerStatuses,
       settings,
+      getModelDisabledReason,
+      interactionMode,
     ],
   );
   const onEnvModeChange = useCallback(

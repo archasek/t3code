@@ -37,7 +37,7 @@ import { composerContextSendBlockReason, reidentifyComposerContext } from "../li
 import { uuidv4 } from "../lib/uuid";
 
 import { makeQueuedMessageMetadata } from "../lib/commandMetadata";
-import { isModelSelectionUnavailable } from "../lib/modelOptions";
+import { isModelSelectionUnavailable, resolveSelectableModelSelection } from "../lib/modelOptions";
 import { resolveProviderInteractionMode } from "./legacy-plan-mode";
 import {
   convertPastedImagesToAttachments,
@@ -327,10 +327,11 @@ export function useThreadComposerState() {
   const draftAttachments = editedDraft?.attachments ?? [];
   const selectedThreadQueueCount = selectedThreadQueuedMessages.length;
   const selectedThread = selectedThreadShell;
-  const modelSelection = selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
+  const storedModelSelection =
+    selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;
   const selectedProvider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
-    (provider) => provider.instanceId === modelSelection?.instanceId,
+    (provider) => provider.instanceId === storedModelSelection?.instanceId,
   );
   const interactionMode = selectedThread
     ? resolveProviderInteractionMode(
@@ -338,6 +339,14 @@ export function useThreadComposerState() {
         selectedDraft?.interactionMode ?? selectedThread.interactionMode,
       )
     : null;
+  const modelSelection =
+    selectedProvider?.driver === "mastraCode"
+      ? resolveSelectableModelSelection(
+          selectedEnvironmentRuntime?.serverConfig,
+          storedModelSelection,
+          interactionMode ?? "default",
+        )
+      : storedModelSelection;
   // Whether the model picker may leave this thread's provider. Derived here
   // because the projection already drives this hook; the composer only needs
   // the answer, not a subscription to every projection update.
@@ -602,8 +611,20 @@ export function useThreadComposerState() {
         return null;
       }
 
-      const modelSelection = draft.modelSelection ?? thread.modelSelection;
       const serverConfig = selectedEnvironmentRuntime?.serverConfig;
+      const storedSelection = draft.modelSelection ?? thread.modelSelection;
+      const selectionProvider = serverConfig?.providers.find(
+        (entry) => entry.instanceId === storedSelection.instanceId,
+      );
+      const sendInteractionMode = resolveProviderInteractionMode(
+        selectionProvider,
+        draft.interactionMode ?? thread.interactionMode,
+      );
+      const modelSelection =
+        selectionProvider?.driver === "mastraCode"
+          ? resolveSelectableModelSelection(serverConfig, storedSelection, sendInteractionMode)
+          : storedSelection;
+      if (!modelSelection) return null;
       if (
         selectedEnvironmentRuntime?.connectionState === "connected" &&
         isModelSelectionUnavailable(serverConfig, modelSelection)

@@ -255,6 +255,7 @@ export interface AcpAdapterV2Flavor {
     readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
     readonly startResult: AcpSessionRuntime.AcpSessionRuntimeStartResult;
     readonly modelSelection: ModelSelection;
+    readonly interactionMode: "default" | "plan";
   }) => Effect.Effect<string | undefined, EffectAcpErrors.AcpError>;
   /** Native session mode to select for a runtime policy (e.g. Antigravity `yolo`). */
   readonly sessionModeForPolicy?: (
@@ -317,7 +318,7 @@ export interface AcpAdapterV2Flavor {
     Effect.Effect<void>,
     EffectAcpErrors.AcpError
   >;
-  /** Schema projection only; waiting and cancellation remain shared. */
+  /** Project questions after bounded eligibility checks; response waiting and cancellation remain shared. */
   readonly prepareFormElicitation?: (input: {
     readonly request: {
       readonly mode: "form";
@@ -326,12 +327,15 @@ export interface AcpAdapterV2Flavor {
     };
     readonly nativeRequestId: string;
     readonly threadId: ThreadId;
-  }) => {
-    readonly questions: ReadonlyArray<OrchestrationV2UserInputQuestion>;
-    readonly respond: (
-      answers: ProviderUserInputAnswers | null,
-    ) => Effect.Effect<EffectAcpSchema.CreateElicitationResponse, EffectAcpErrors.AcpError>;
-  };
+  }) => Effect.Effect<
+    {
+      readonly questions: ReadonlyArray<OrchestrationV2UserInputQuestion>;
+      readonly respond: (
+        answers: ProviderUserInputAnswers | null,
+      ) => Effect.Effect<EffectAcpSchema.CreateElicitationResponse, EffectAcpErrors.AcpError>;
+    },
+    EffectAcpErrors.AcpError
+  >;
   /** Approval choices to advertise on the approval card for a permission request. */
   readonly approvalOptions?: (
     request: EffectAcpSchema.RequestPermissionRequest,
@@ -5873,7 +5877,9 @@ export function makeAcpAdapterV2(
                 "sessionId" in params ? params.sessionId : `request:${params.requestId}`;
               let formContext: ActiveAcpTurn | undefined;
               let preparedForm:
-                | ReturnType<NonNullable<AcpAdapterV2Flavor["prepareFormElicitation"]>>
+                | Effect.Success<
+                    ReturnType<NonNullable<AcpAdapterV2Flavor["prepareFormElicitation"]>>
+                  >
                 | undefined;
               const questions = Object.entries(properties).map(
                 ([id, property], index): OrchestrationV2UserInputQuestion => {
@@ -5940,7 +5946,7 @@ export function makeAcpAdapterV2(
                         }),
                       );
                     }
-                    preparedForm = flavor.prepareFormElicitation({
+                    preparedForm = yield* flavor.prepareFormElicitation({
                       request: {
                         mode: "form",
                         message: params.message,
@@ -6501,6 +6507,7 @@ export function makeAcpAdapterV2(
               runtime,
               startResult,
               modelSelection,
+              interactionMode: runtimePolicy.interactionMode,
             });
             if (applied !== undefined) {
               yield* Ref.update(activeSessionSetup, (setup) => {

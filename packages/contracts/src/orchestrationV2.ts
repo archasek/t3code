@@ -1098,11 +1098,13 @@ export const OrchestrationV2UserInputQuestion = Schema.Struct({
       label: TrimmedNonEmptyString,
       description: TrimmedNonEmptyString,
       value: Schema.optional(Schema.String),
+      exclusive: Schema.optional(Schema.Boolean),
     }),
   ),
   multiSelect: Schema.optional(Schema.Boolean),
   allowCustomAnswer: Schema.optional(Schema.Boolean),
   answerFormat: Schema.optional(Schema.Literal("raw-string")),
+  allowEmptyAnswer: Schema.optional(Schema.Boolean),
   required: Schema.optional(Schema.Boolean),
 });
 export type OrchestrationV2UserInputQuestion = typeof OrchestrationV2UserInputQuestion.Type;

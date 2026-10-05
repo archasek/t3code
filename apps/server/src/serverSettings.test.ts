@@ -875,6 +875,61 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect(
+    "loads old Mastra Code instances without disabling them or undoing explicit disables",
+    () =>
+      Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const service = yield* ServerSettingsModule.ServerSettingsService;
+        yield* fs.writeFileString(
+          serverConfig.settingsPath,
+          `{
+        "providerInstances": {
+          "mc_old": { "driver": "mastraCode", "config": {} },
+          "mc_off": { "driver": "mastraCode", "enabled": false, "config": {} },
+          "mc_config_off": { "driver": "mastraCode", "enabled": true, "config": { "enabled": false } }
+        }
+      }`,
+        );
+        const settings = yield* service.getSettings;
+        assert.isTrue(
+          resolveProviderInstanceEnabled(
+            settings.providerInstances[ProviderInstanceId.make("mc_old")]!,
+          ),
+        );
+        assert.isFalse(
+          resolveProviderInstanceEnabled(
+            settings.providerInstances[ProviderInstanceId.make("mc_off")]!,
+          ),
+        );
+        assert.isFalse(
+          resolveProviderInstanceEnabled(
+            settings.providerInstances[ProviderInstanceId.make("mc_config_off")]!,
+          ),
+        );
+        assert.isFalse(settings.providers.mastraCode.enabled);
+        assert.equal(
+          settings.providers.codex.enabled,
+          DEFAULT_SERVER_SETTINGS.providers.codex.enabled,
+        );
+        yield* service.updateSettings({ responseStreamingMode: "turn" });
+        const persisted = yield* decodeServerSettingsJson(
+          yield* fs.readFileString(serverConfig.settingsPath),
+        );
+        assert.isTrue(
+          resolveProviderInstanceEnabled(
+            persisted.providerInstances[ProviderInstanceId.make("mc_old")]!,
+          ),
+        );
+        assert.isFalse(
+          resolveProviderInstanceEnabled(
+            persisted.providerInstances[ProviderInstanceId.make("mc_config_off")]!,
+          ),
+        );
+      }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("preserves existing provider instances without explicit enabled flags", () =>
     Effect.gen(function* () {
       const serverConfig = yield* ServerConfig.ServerConfig;

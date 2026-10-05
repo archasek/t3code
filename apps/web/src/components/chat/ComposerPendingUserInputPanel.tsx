@@ -143,14 +143,17 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     [activeQuestion, onToggleOption],
   );
 
-  const handleLiteralAnswerChange = useCallback((questionId: string, value: string) => {
-    if (autoAdvanceTimerRef.current !== null) {
-      window.clearTimeout(autoAdvanceTimerRef.current);
-      autoAdvanceTimerRef.current = null;
-    }
-    setOptimisticSingleSelect(null);
-    onChangeCustomAnswer(questionId, value);
-  }, [onChangeCustomAnswer]);
+  const handleLiteralAnswerChange = useCallback(
+    (questionId: string, value: string) => {
+      if (autoAdvanceTimerRef.current !== null) {
+        window.clearTimeout(autoAdvanceTimerRef.current);
+        autoAdvanceTimerRef.current = null;
+      }
+      setOptimisticSingleSelect(null);
+      onChangeCustomAnswer(questionId, value);
+    },
+    [onChangeCustomAnswer],
+  );
 
   // Keyboard shortcut: number keys 1-9 select corresponding options when focus is
   // outside editable fields. Multi-select prompts toggle options in place; single-
@@ -249,16 +252,31 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
         <ComposerBanner.Scroll>
           <ComposerBanner.Body className="pe-1 pb-1 wrap-anywhere">
             <p className="text-sm text-foreground/85">{activeQuestion.question}</p>
-            {activeQuestion.answerFormat === "raw-string" && activeQuestion.allowCustomAnswer !== false ? (
+            {activeQuestion.answerFormat === "raw-string" &&
+            activeQuestion.allowCustomAnswer !== false ? (
               <div className="mt-2 space-y-2">
-                <textarea aria-label={`Literal value: ${activeQuestion.header}`}
-                  value={progress.customAnswer} disabled={responseDisabled}
-                  onChange={(event) => handleLiteralAnswerChange(activeQuestion.id, event.target.value)}
-                  spellCheck={false} autoCapitalize="off" rows={3}
-                  className="w-full rounded-md border border-border bg-background p-2 text-sm" />
-                <button type="button" disabled={responseDisabled}
-                  onClick={() => handleLiteralAnswerChange(activeQuestion.id, "")}
-                  className="text-xs text-muted-foreground underline">Use empty value</button>
+                <textarea
+                  aria-label={`Literal value: ${activeQuestion.header}`}
+                  value={progress.customAnswer}
+                  disabled={responseDisabled}
+                  onChange={(event) =>
+                    handleLiteralAnswerChange(activeQuestion.id, event.target.value)
+                  }
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  rows={3}
+                  className="w-full rounded-md border border-border bg-background p-2 text-sm"
+                />
+                {activeQuestion.allowEmptyAnswer === true ? (
+                  <button
+                    type="button"
+                    disabled={responseDisabled}
+                    onClick={() => handleLiteralAnswerChange(activeQuestion.id, "")}
+                    className="text-xs text-muted-foreground underline"
+                  >
+                    Use empty value
+                  </button>
+                ) : null}
               </div>
             ) : null}
             {activeQuestion.multiSelect ? (

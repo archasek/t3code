@@ -2,6 +2,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   PROJECT_SCOPED_SERVER_SETTING_KEYS,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -21,14 +22,21 @@ const otherProjectId = ProjectId.make("project-b");
 
 describe("resolveProjectSettings", () => {
   it("keeps MC for project conversations but excludes it from background generation", () => {
-    const selection = createModelSelection(ProviderInstanceId.make("mc-project"), "default");
+    const instanceId = ProviderInstanceId.make("mc-project");
+    const selection = createModelSelection(instanceId, "default");
     const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
-      providerInstances: { "mc-project": { driver: "mastraCode", enabled: true, config: {} } },
-      projectSettingsOverrides: { [projectId]: { defaultModelSelection: selection, textGenerationModelSelection: selection } },
+      providerInstances: {
+        [instanceId]: { driver: ProviderDriverKind.make("mastraCode"), enabled: true, config: {} },
+      },
+      projectSettingsOverrides: {
+        [projectId]: { defaultModelSelection: selection, textGenerationModelSelection: selection },
+      },
     });
     const resolved = resolveProjectSettings(settings, projectId);
     expect(resolved.settings.defaultModelSelection).toEqual(selection);
-    expect(resolved.settings.textGenerationModelSelection).toEqual(settings.textGenerationModelSelection);
+    expect(resolved.settings.textGenerationModelSelection).toEqual(
+      settings.textGenerationModelSelection,
+    );
     expect(resolved.sources.defaultModelSelection).toBe("project");
     expect(resolved.sources.textGenerationModelSelection).toBe("environment");
   });
