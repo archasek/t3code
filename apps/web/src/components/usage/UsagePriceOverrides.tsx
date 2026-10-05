@@ -400,6 +400,11 @@ export function UsagePriceOverrides({
                       rows.map((row) => {
                         const aliasCell = usageAliasCell(selected, row.model);
                         const alias = (row.alias ?? aliasCell.value).trim();
+                        const showError =
+                          errors.has(row.id) &&
+                          (row.model.trim() !== "" ||
+                            (row.alias?.trim() ?? "") !== "" ||
+                            Object.values(row.values).some((value) => value !== ""));
                         return (
                           <TableRow key={row.id} data-row-id={row.id}>
                             <TableCell className="whitespace-normal">
@@ -414,9 +419,7 @@ export function UsagePriceOverrides({
                                     }
                                   }}
                                   aria-label="New model ID"
-                                  aria-invalid={
-                                    (row.model.trim() !== "" && errors.has(row.id)) || undefined
-                                  }
+                                  aria-invalid={showError || undefined}
                                   list="usage-price-models"
                                   placeholder="Model ID"
                                   autoComplete="off"
@@ -436,9 +439,7 @@ export function UsagePriceOverrides({
                                   {row.model}
                                 </span>
                               )}
-                              {errors.has(row.id) &&
-                              (row.model.trim() !== "" ||
-                                Object.values(row.values).some((value) => value !== "")) ? (
+                              {showError ? (
                                 <p role="alert" className="mt-1 text-xs text-destructive">
                                   {errors.get(row.id)}
                                 </p>

@@ -7,14 +7,12 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Encoding from "effect/Encoding";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
-import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
@@ -27,7 +25,6 @@ import {
   CommandId,
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
-  type AuthEnvironmentScope,
   AuthSessionId,
   ClientConnectionMethod,
   ClientDeviceType,
@@ -86,7 +83,6 @@ import {
   ChatAttachmentId,
   PersistChatAttachmentsError,
   RpcClientId,
-  EnvironmentAuthorizationError,
   type ProjectId,
   type ProviderDriverKind,
   type ProviderInstanceId,
@@ -207,11 +203,7 @@ import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as RemoteOpenTargets from "./environment/RemoteOpenTargets.ts";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
-import {
-  requiredScopeForDeviceList,
-  rpcAuthorizationError,
-  rpcScopeAuthorizationLayer,
-} from "./auth/RpcAuthorization.ts";
+import { authorizeDeviceList, rpcScopeAuthorizationLayer } from "./auth/RpcAuthorization.ts";
 import * as ProcessDiagnostics from "./diagnostics/ProcessDiagnostics.ts";
 import * as ProcessResourceMonitor from "./diagnostics/ProcessResourceMonitor.ts";
 import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
@@ -1238,7 +1230,7 @@ const makeWsRpcLayer = (
             );
       const usage = yield* UsageService.UsageService;
       const usageLimitSources = yield* UsageLimitSources.UsageLimitSources;
-      const projectSetupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+      yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
       const worktreeSetupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
       const projectCloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
       const repositoryIdentityResolver =
@@ -1313,15 +1305,6 @@ const makeWsRpcLayer = (
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const relayClient = yield* RelayClient.RelayClient;
-      // RpcScopeAuthorization checks each RPC's declared scope before its handler
-      // runs. This covers the one RPC whose scope depends on its input.
-      const authorizeEffect = <A, E, R>(
-        requiredScope: AuthEnvironmentScope,
-        effect: Effect.Effect<A, E, R>,
-      ): Effect.Effect<A, E | EnvironmentAuthorizationError, R> =>
-        currentSession.scopes.includes(requiredScope)
-          ? effect
-          : Effect.fail(rpcAuthorizationError(requiredScope));
 
       const acpRegistryProject = Effect.fn("ws.acpRegistry.project")(function* (
         projectId: ProjectId,
@@ -3523,16 +3506,17 @@ const makeWsRpcLayer = (
         [WS_METHODS.deviceList]: (input) =>
           observeRpcEffect(
             WS_METHODS.deviceList,
-            input.inspectOnly && !input.updateTool
-              ? deviceService.inspect
-              : authorizeEffect(
-                  requiredScopeForDeviceList(input),
-                  input.updateTool
-                    ? deviceService.updateTool(input.updateTool)
-                    : input.retryHostId
-                      ? deviceService.retryHost(input.retryHostId)
-                      : deviceService.list,
-                ),
+            authorizeDeviceList(
+              currentSession.scopes,
+              input,
+              input.inspectOnly && !input.updateTool
+                ? deviceService.inspect
+                : input.updateTool
+                  ? deviceService.updateTool(input.updateTool)
+                  : input.retryHostId
+                    ? deviceService.retryHost(input.retryHostId)
+                    : deviceService.list,
+            ),
             {
               "rpc.aggregate": "device",
             },

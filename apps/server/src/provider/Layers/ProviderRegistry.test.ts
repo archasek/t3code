@@ -2944,10 +2944,16 @@ it.layer(Layer.mergeAll(TestNodeServices, ServerSettingsModule.layerTest(), Test
                 "codex",
                 "cursor",
                 "grok",
+                "mastraCode",
                 "opencode",
                 "pi",
               ]);
               assert.strictEqual(cursorProvider?.enabled, false);
+              const mastraProvider = providers.find(
+                (provider) => provider.instanceId === ProviderInstanceId.make("mastraCode"),
+              );
+              assert.strictEqual(mastraProvider?.enabled, false);
+              assert.strictEqual(mastraProvider?.status, "disabled");
               assert.strictEqual(cursorProvider?.status, "disabled");
               assert.strictEqual(
                 cursorProvider?.message,

@@ -440,7 +440,8 @@ export const probeClaudeWorkspaceSnapshot = Effect.fn("probeClaudeWorkspaceSnaps
       COMPACT_SLASH_COMMAND,
       ...(capabilities?.slashCommands ?? []),
     ]),
-    slashCommandsPending: !capabilities,
+    // Failure is a completed scan too; ordinary workspace reads must not spawn another probe.
+    slashCommandsPending: false,
   };
 });
 

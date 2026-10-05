@@ -18,9 +18,15 @@ export function createShakeDetector({
 }: { threshold?: number; window?: number; cooldown?: number } = {}) {
   let jolts: number[] = [];
   let lastShake = Number.NEGATIVE_INFINITY;
+  let armed = true;
   return (sample: AccelerationSample) => {
+    if (Math.hypot(sample.x, sample.y, sample.z) < threshold) {
+      armed = true;
+      return false;
+    }
+    if (!armed) return false;
+    armed = false;
     if (sample.timestamp - lastShake < cooldown) return false;
-    if (Math.hypot(sample.x, sample.y, sample.z) < threshold) return false;
     jolts = [...jolts.filter((time) => sample.timestamp - time <= window), sample.timestamp];
     if (jolts.length < 2) return false;
     jolts = [];

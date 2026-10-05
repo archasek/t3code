@@ -227,9 +227,11 @@ export const rpcAuthorizationError = (requiredScope: AuthEnvironmentScope) =>
 export const rpcScopeAuthorizationLayer = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
   Layer.succeed(RpcScopeAuthorization)((effect, { rpc }) => {
     const requiredScope = requiredScopeForRpcMethod(rpc._tag);
-    return scopes.includes(requiredScope)
-      ? effect
-      : Effect.fail(rpcAuthorizationError(requiredScope));
+    // deviceList chooses read or operate in its handler after decoding the input.
+    const admitted =
+      scopes.includes(requiredScope) ||
+      (rpc._tag === WS_METHODS.deviceList && scopes.includes(AuthOrchestrationOperateScope));
+    return admitted ? effect : Effect.fail(rpcAuthorizationError(requiredScope));
   });
 
 /** Retrying can install or restart tools even though ordinary listing is readable. */
@@ -237,3 +239,15 @@ export const requiredScopeForDeviceList = (input: DeviceListInput): AuthEnvironm
   input.retryHostId || input.updateTool
     ? AuthOrchestrationOperateScope
     : AuthOrchestrationReadScope;
+
+/** Every deviceList branch, including inspection, must enforce its input's scope. */
+export const authorizeDeviceList = <A, E, R>(
+  scopes: ReadonlyArray<AuthEnvironmentScope>,
+  input: DeviceListInput,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | EnvironmentAuthorizationError, R> => {
+  const requiredScope = requiredScopeForDeviceList(input);
+  return scopes.includes(requiredScope)
+    ? effect
+    : Effect.fail(rpcAuthorizationError(requiredScope));
+};

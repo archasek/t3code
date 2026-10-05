@@ -17,6 +17,9 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Layer from "effect/Layer";
+import * as PubSub from "effect/PubSub";
+import * as Stream from "effect/Stream";
 
 import {
   buildClaudeCapabilitiesProbeQueryOptions,
@@ -25,6 +28,13 @@ import {
   probeClaudeWorkspaceSnapshot,
 } from "./ClaudeProvider.ts";
 import { COMPACT_SLASH_COMMAND } from "../providerSnapshot.ts";
+import type { ProviderInstance, ProviderWorkspaceSnapshot } from "../ProviderDriver.ts";
+import * as ProviderInstanceRegistry from "../Services/ProviderInstanceRegistry.ts";
+import * as ProviderRegistry from "../Services/ProviderRegistry.ts";
+import { ProviderRegistryLive } from "./ProviderRegistry.ts";
+import * as ModelManifest from "../ModelManifest.ts";
+import * as ServerConfig from "../../config.ts";
+import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 
 vi.mock("@anthropic-ai/claude-agent-sdk", { spy: true });
 
@@ -155,85 +165,163 @@ it.layer(NodeServices.layer)("Claude capability probe SDK boundary", (it) => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect("keeps readable skills during failed command discovery and recovers on retry", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-workspace-retry-" });
-      const skillDir = path.join(cwd, ".claude", "skills", "existing-skill");
-      yield* fs.makeDirectory(skillDir, { recursive: true });
-      yield* fs.writeFileString(
-        path.join(skillDir, "SKILL.md"),
-        "---\nname: existing-skill\ndescription: Existing project skill\n---\nUse this skill.",
-      );
-      const machineSnapshot = {
-        instanceId: ProviderInstanceId.make("claude"),
-        driver: ProviderDriverKind.make("claudeAgent"),
-        enabled: true,
-        installed: true,
-        status: "ready",
-        auth: { status: "authenticated" },
-        checkedAt: "2026-03-25T00:00:00.000Z",
-        version: "2.1.288",
-        models: [],
-        slashCommands: [{ name: "server-cwd-only" }],
-        skills: [],
-      } satisfies ServerProvider;
-      const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(
-        () =>
-          ({
-            initializationResult: () =>
-              Promise.reject<ClaudeSdk.SDKControlInitializeResponse>(
-                new Error("Initialization failed"),
-              ),
-            usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({
-              rate_limits_available: false,
-              rate_limits: null,
-            }),
-          }) as ReturnType<typeof ClaudeSdk.query>,
-      );
-      yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
-      const settings = decodeClaudeSettings({ homePath: cwd });
-      const failed = yield* probeClaudeWorkspaceSnapshot(settings, machineSnapshot, cwd);
-      assert.deepEqual(failed, {
-        ...machineSnapshot,
-        slashCommands: [COMPACT_SLASH_COMMAND],
-        slashCommandsPending: true,
-        skills: [
-          {
-            name: "existing-skill",
-            path: path.join(skillDir, "SKILL.md"),
-            enabled: true,
-            scope: "project",
-            description: "Existing project skill",
+  it.effect(
+    "caches failed Claude discovery across ordinary snapshots and recovers on fresh refresh",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-claude-workspace-retry-" });
+        const skillDir = path.join(cwd, ".claude", "skills", "existing-skill");
+        yield* fs.makeDirectory(skillDir, { recursive: true });
+        yield* fs.writeFileString(
+          path.join(skillDir, "SKILL.md"),
+          "---\nname: existing-skill\ndescription: Existing project skill\n---\nUse this skill.",
+        );
+        const machineSnapshot = {
+          instanceId: ProviderInstanceId.make("claude"),
+          driver: ProviderDriverKind.make("claudeAgent"),
+          enabled: true,
+          installed: true,
+          status: "ready",
+          auth: { status: "authenticated" },
+          checkedAt: "2026-03-25T00:00:00.000Z",
+          version: "2.1.288",
+          models: [],
+          slashCommands: [{ name: "server-cwd-only" }],
+          skills: [],
+        } satisfies ServerProvider;
+        const query = vi.spyOn(ClaudeSdk, "query").mockImplementation(
+          () =>
+            ({
+              initializationResult: () =>
+                Promise.reject<ClaudeSdk.SDKControlInitializeResponse>(
+                  new Error("Initialization failed"),
+                ),
+              usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({
+                rate_limits_available: false,
+                rate_limits: null,
+              }),
+            }) as ReturnType<typeof ClaudeSdk.query>,
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(() => query.mockRestore()));
+        const settings = decodeClaudeSettings({ homePath: cwd });
+        const scopedSnapshots: Array<ProviderWorkspaceSnapshot> = [];
+        let invalidations = 0;
+        const instance: ProviderInstance = {
+          instanceId: machineSnapshot.instanceId,
+          driverKind: machineSnapshot.driver,
+          continuationIdentity: {
+            driverKind: machineSnapshot.driver,
+            continuationKey: "claude:test",
           },
-        ],
-      });
-      query.mockImplementation(
-        () =>
-          ({
-            initializationResult: async () => ({
-              commands: [{ name: "recovered", description: "", argumentHint: "" }],
-            }),
-            usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({
-              rate_limits_available: false,
-              rate_limits: null,
-            }),
-          }) as ReturnType<typeof ClaudeSdk.query>,
-      );
-      const recovered = yield* probeClaudeWorkspaceSnapshot(settings, machineSnapshot, cwd);
-      assert.deepEqual(recovered.slashCommands, [COMPACT_SLASH_COMMAND, { name: "recovered" }]);
-      assert.equal(recovered.status, "ready");
-      assert.equal(recovered.slashCommandsPending, false);
-      assert.deepEqual(recovered.skills, failed.skills);
-      const disabled = yield* probeClaudeWorkspaceSnapshot(
-        { ...settings, enabled: false },
-        machineSnapshot,
-        cwd,
-      );
-      assert.equal(disabled, machineSnapshot);
-      assert.equal(query.mock.calls.length, 2);
-    }).pipe(Effect.scoped),
+          displayName: undefined,
+          enabled: true,
+          snapshot: {
+            resolveMaintenance: () =>
+              Effect.succeed(
+                makeManualOnlyProviderMaintenanceCapabilities({
+                  provider: machineSnapshot.driver,
+                  packageName: null,
+                }),
+              ),
+            getSnapshot: Effect.succeed(machineSnapshot),
+            refresh: Effect.succeed(machineSnapshot),
+            streamChanges: Stream.empty,
+            applyUsageLimits: () => Effect.void,
+          },
+          snapshotForCwd: (workspace) =>
+            probeClaudeWorkspaceSnapshot(settings, machineSnapshot, workspace).pipe(
+              Effect.tap((snapshot) => Effect.sync(() => scopedSnapshots.push(snapshot))),
+              Effect.provideService(FileSystem.FileSystem, fs),
+              Effect.provideService(Path.Path, path),
+            ),
+          invalidateCaches: Effect.sync(() => {
+            invalidations++;
+          }),
+          orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
+          textGeneration: {} as ProviderInstance["textGeneration"],
+        };
+        const services = yield* Layer.build(
+          ProviderRegistryLive.pipe(
+            Layer.provide(
+              Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
+                getInstance: (id) =>
+                  Effect.succeed(id === instance.instanceId ? instance : undefined),
+                listInstances: Effect.succeed([instance]),
+                listUnavailable: Effect.succeed([]),
+                streamChanges: Stream.empty,
+                subscribeChanges: PubSub.unbounded<void>().pipe(Effect.flatMap(PubSub.subscribe)),
+              }),
+            ),
+            Layer.provide(ModelManifest.layerTest),
+            Layer.provide(ServerConfig.layerTest(cwd, { prefix: "t3-claude-discovery-cache-" })),
+            Layer.provide(NodeServices.layer),
+          ),
+        );
+        const registry = yield* ProviderRegistry.ProviderRegistry.pipe(Effect.provide(services));
+        const input = { instanceId: instance.instanceId, cwd };
+        yield* registry.refreshWorkspaceSnapshot(input);
+        const failed = scopedSnapshots[0]!;
+        assert.deepEqual(failed, {
+          ...machineSnapshot,
+          slashCommands: [COMPACT_SLASH_COMMAND],
+          slashCommandsPending: false,
+          skills: [
+            {
+              name: "existing-skill",
+              path: path.join(skillDir, "SKILL.md"),
+              enabled: true,
+              scope: "project",
+              description: "Existing project skill",
+            },
+          ],
+        });
+        for (let read = 0; read < 3; read++) {
+          yield* registry.refreshWorkspaceSnapshot(input);
+          const providers = yield* registry.getProviders;
+          assert.deepEqual(providers[0]?.workspaceSnapshots?.[0]?.slashCommands, [
+            COMPACT_SLASH_COMMAND,
+          ]);
+          assert.notEqual(providers[0]?.workspaceSnapshots?.[0]?.slashCommandsPending, true);
+        }
+        assert.equal(query.mock.calls.length, 1);
+        query.mockImplementation(
+          () =>
+            ({
+              initializationResult: async () => ({
+                commands: [{ name: "recovered", description: "", argumentHint: "" }],
+              }),
+              usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: async () => ({
+                rate_limits_available: false,
+                rate_limits: null,
+              }),
+            }) as ReturnType<typeof ClaudeSdk.query>,
+        );
+        // Ordinary reads still use the failed completion even after the SDK could recover.
+        yield* registry.refreshWorkspaceSnapshot(input);
+        assert.equal(query.mock.calls.length, 1);
+        yield* registry.refreshWorkspaceSnapshot({ ...input, fresh: true });
+        assert.equal(invalidations, 1);
+        const recovered = scopedSnapshots[1]!;
+        assert.deepEqual(recovered.slashCommands, [COMPACT_SLASH_COMMAND, { name: "recovered" }]);
+        assert.equal(recovered.status, "ready");
+        assert.equal(recovered.slashCommandsPending, false);
+        assert.deepEqual(recovered.skills, failed.skills);
+        assert.deepEqual(
+          (yield* registry.getProviders)[0]?.workspaceSnapshots?.[0]?.slashCommands,
+          [COMPACT_SLASH_COMMAND, { name: "recovered" }],
+        );
+        yield* registry.refreshWorkspaceSnapshot(input);
+        assert.equal(query.mock.calls.length, 2);
+        const disabled = yield* probeClaudeWorkspaceSnapshot(
+          { ...settings, enabled: false },
+          machineSnapshot,
+          cwd,
+        );
+        assert.equal(disabled, machineSnapshot);
+        assert.equal(query.mock.calls.length, 2);
+      }).pipe(Effect.scoped),
   );
 
   it.effect("serializes strict no-MCP options and still resolves account capabilities", () =>

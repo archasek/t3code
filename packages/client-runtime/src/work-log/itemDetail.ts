@@ -225,7 +225,11 @@ export function turnItemHasDetail(item: OrchestrationV2TurnItem): boolean {
     case "web_search":
       return (item.results?.length ?? 0) > 0 || (item.patterns?.length ?? 0) > 0;
     case "dynamic_tool":
-      return item.outputOmitted === true || toolCallHasLines(toolCallLines({ args: item.input }));
+      return (
+        item.outputOmitted === true ||
+        toolCallHasLines(toolCallLines({ args: item.input })) ||
+        turnItemOutputText(item) !== null
+      );
     case "approval_request":
       return Boolean(item.prompt?.trim());
     case "user_input_request":

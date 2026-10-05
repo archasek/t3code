@@ -3,6 +3,7 @@ import {
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
+  type AuthEnvironmentScope,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -16,6 +17,7 @@ import {
   requiredScopeForRpcMethod,
   requiredScopeForDeviceList,
   rpcScopeAuthorizationLayer,
+  authorizeDeviceList,
 } from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
@@ -105,6 +107,74 @@ describe("RPC authorization scopes", () => {
       );
     }
   });
+});
+
+describe("deviceList RPC scope composition", () => {
+  const state = {
+    devices: [],
+    hosts: [],
+    sessions: [],
+    hostStatus: "ready" as const,
+    hostStatuses: {},
+    onboardingCompleted: true,
+    agentAccessEnabled: false,
+    hubBasePath: "/api/device",
+    revision: 0,
+  };
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, typeof WS_METHODS.deviceList> =>
+        tag !== WS_METHODS.deviceList,
+    ),
+  );
+
+  const scopeCases: ReadonlyArray<ReadonlyArray<AuthEnvironmentScope>> = [
+    [AuthOrchestrationReadScope],
+    [AuthOrchestrationOperateScope],
+  ];
+  it.effect.each(scopeCases.map((scopes) => ({ scopes })))(
+    "enforces input scopes after middleware admission for $scopes",
+    ({ scopes }) =>
+      Effect.gen(function* () {
+        const handled: Array<string> = [];
+        const client = yield* RpcTest.makeClient(group).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              group.toLayerHandler(WS_METHODS.deviceList, (input) =>
+                authorizeDeviceList(
+                  scopes,
+                  input,
+                  Effect.sync(() => {
+                    handled.push(input.updateTool ?? input.retryHostId ?? "list");
+                    return state;
+                  }),
+                ),
+              ),
+              rpcScopeAuthorizationLayer(scopes),
+            ),
+          ),
+        );
+        const operates = scopes.includes(AuthOrchestrationOperateScope);
+        for (const input of [
+          {},
+          { inspectOnly: true },
+          { updateTool: "hub" as const },
+          { updateTool: "agent" as const, inspectOnly: true },
+          { retryHostId: "remote-host" },
+        ]) {
+          const mutation = Boolean(input.updateTool || input.retryHostId);
+          if (mutation === operates) {
+            expect(yield* client[WS_METHODS.deviceList](input)).toEqual(state);
+          } else {
+            expect(yield* client[WS_METHODS.deviceList](input).pipe(Effect.flip)).toMatchObject({
+              _tag: "EnvironmentAuthorizationError",
+              requiredScope: mutation ? AuthOrchestrationOperateScope : AuthOrchestrationReadScope,
+            });
+          }
+        }
+        expect(handled).toEqual(operates ? ["hub", "agent", "remote-host"] : ["list", "list"]);
+      }).pipe(Effect.scoped),
+  );
 });
 
 it("requires operate permission for host retry while preserving read-only listing", () => {
