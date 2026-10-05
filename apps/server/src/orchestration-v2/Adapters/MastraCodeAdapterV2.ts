@@ -15,7 +15,10 @@ import {
 } from "../../provider/MastraCodeElicitationValidation.ts";
 import { readMastraCodePlan } from "../../provider/MastraCodePlan.ts";
 import { checkMastraCodeProviderStatus } from "../../provider/Layers/MastraCodeProvider.ts";
-import { applyMastraCodeModelSelection } from "../../provider/MastraCodeModelSelection.ts";
+import {
+  applyMastraCodeModelSelection,
+  applyMastraCodeThinkingSelection,
+} from "../../provider/MastraCodeModelSelection.ts";
 import { acpPermissionDisposition, unknownRecord } from "../../provider/acp/AcpClientPolicy.ts";
 import {
   AcpProviderCapabilitiesV2,
@@ -73,7 +76,10 @@ export function makeMastraCodeAdapterV2(options: MastraCodeAdapterV2Options) {
       Effect.gen(function* () {
         // Setup-time ACP model lists omit native mode constraints. Qualify the
         // running binary's catalog before applying an explicit model per mode.
-        if (["default", "auto", ""].includes(input.modelSelection.model)) return undefined;
+        if (["default", "auto", ""].includes(input.modelSelection.model)) {
+          yield* applyMastraCodeThinkingSelection(input);
+          return undefined;
+        }
         const catalog = yield* checkMastraCodeProviderStatus(
           options.settings,
           options.environment,
@@ -83,7 +89,9 @@ export function makeMastraCodeAdapterV2(options: MastraCodeAdapterV2Options) {
             options.childProcessSpawner,
           ),
         );
-        return yield* applyMastraCodeModelSelection({ ...input, models: catalog.models });
+        const applied = yield* applyMastraCodeModelSelection({ ...input, models: catalog.models });
+        yield* applyMastraCodeThinkingSelection(input);
+        return applied;
       }),
     sessionModeForPolicy: (policy) => (policy.interactionMode === "plan" ? "plan" : "build"),
     permissionDisposition: (policy, request) =>

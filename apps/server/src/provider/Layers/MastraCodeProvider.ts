@@ -49,6 +49,7 @@ const MastraCodeInfoSchema = Schema.Struct({
     Schema.Struct({
       id: Schema.String,
       modes: Schema.optional(Schema.Array(Schema.String)),
+      thinkingLevels: Schema.optional(Schema.Array(Schema.String)),
     }),
   ),
   auth: Schema.Struct({
@@ -156,7 +157,7 @@ function modelsFromInfo(info: MastraCodeInfo | undefined): ReadonlyArray<ServerP
   const defaultBuildModel = models
     .find(({ id, modes }) => id.trim() && (modes === undefined || modes.includes("build")))
     ?.id.trim();
-  return models.flatMap(({ id, modes }) => {
+  return models.flatMap(({ id, modes, thinkingLevels }) => {
     const slug = id.trim();
     if (!slug || slug.length > 256 || seen.has(slug)) return [];
     seen.add(slug);
@@ -177,7 +178,21 @@ function modelsFromInfo(info: MastraCodeInfo | undefined): ReadonlyArray<ServerP
                     : [],
               ),
             }),
-        capabilities: EMPTY_CAPABILITIES,
+        capabilities: createModelCapabilities({
+          optionDescriptors: thinkingLevels?.length
+            ? [
+                {
+                  id: "thought_level",
+                  label: "Reasoning effort",
+                  type: "select",
+                  options: [...new Set(thinkingLevels)].map((level) => ({
+                    id: level,
+                    label: level.charAt(0).toUpperCase() + level.slice(1),
+                  })),
+                },
+              ]
+            : [],
+        }),
       },
     ];
   });

@@ -2080,6 +2080,7 @@ describe("AcpAdapterV2", () => {
         );
         yield* fs.chmod(launcher, 0o700);
         const instanceId = ProviderInstanceId.make("mc-real-v2");
+        const observedThinking: string[] = [];
         const adapter = makeMastraCodeAdapterV2({
           instanceId,
           appDataDirectory,
@@ -2103,6 +2104,22 @@ describe("AcpAdapterV2", () => {
           idAllocator: yield* IdAllocator.IdAllocatorV2,
           serverConfig: yield* ServerConfig.ServerConfig,
           selfInvocation: yield* resolveSelfInvocation(),
+          wrapRuntime: (task) =>
+            task.pipe(
+              Effect.map((runtime) => ({
+                ...runtime,
+                getConfigOptions: runtime.getConfigOptions.pipe(
+                  Effect.tap((options) =>
+                    Effect.sync(() => {
+                      const value = options.find(
+                        (option) => option.id === "thought_level",
+                      )?.currentValue;
+                      if (typeof value === "string") observedThinking.push(value);
+                    }),
+                  ),
+                ),
+              })),
+            ),
         });
         const threadId = ThreadId.make("mc-real-v2");
         const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
@@ -2110,7 +2127,11 @@ describe("AcpAdapterV2", () => {
           interactionMode: "default",
           cwd: workspace,
         });
-        const modelSelection = { instanceId, model: "default" } as const;
+        const modelSelection = {
+          instanceId,
+          model: "openai/gpt-6.1-sol",
+          options: [{ id: "thought_level", value: "high" }],
+        } as const;
         const firstScope = yield* Scope.make();
         yield* Effect.addFinalizer(() => Scope.close(firstScope, Exit.void));
         const first = yield* adapter
@@ -2133,6 +2154,7 @@ describe("AcpAdapterV2", () => {
             instanceId,
             runtimePolicy,
             now: yield* DateTime.now,
+            modelSelection,
             messageText: "T3-MC-FIXTURE-RESUME",
           }),
         );
@@ -2144,18 +2166,31 @@ describe("AcpAdapterV2", () => {
         const firstTerminal = Option.getOrThrow(terminal);
         assert.equal(firstTerminal.type, "turn.terminal");
         if (firstTerminal.type === "turn.terminal") assert.equal(firstTerminal.status, "completed");
+        const firstRequest = JSON.parse(
+          yield* fs.readFileString(path.join(fixture, "paths-RESUME.json")),
+        );
+        assert.equal(firstRequest.reasoningEffort, "high");
         yield* Scope.close(firstScope, Exit.void);
+        yield* fs.remove(path.join(fixture, "paths-RESUME.json"));
         const persistedNativeId = providerThread.nativeThreadRef?.nativeId;
         if (typeof persistedNativeId !== "string")
           return yield* Effect.die("MC did not return a native conversation ID");
+        // Do not reapply effort: prove that native thread storage restored it.
+        const restoredSelection = { instanceId, model: "default" } as const;
+        observedThinking.length = 0;
         const restored = yield* adapter.openSession({
           threadId,
           providerSessionId: ProviderSessionId.make("mc-real-restored"),
-          modelSelection,
+          modelSelection: restoredSelection,
           runtimePolicy,
           initialNativeThreadId: persistedNativeId,
         });
-        const binding = yield* restored.ensureThread({ threadId, modelSelection, runtimePolicy });
+        const binding = yield* restored.ensureThread({
+          threadId,
+          modelSelection: restoredSelection,
+          runtimePolicy,
+        });
+        assert.equal(observedThinking.at(-1), "high");
         assert.equal(binding.nativeThreadRef?.nativeId, providerThread.nativeThreadRef?.nativeId);
         yield* restored.startTurn(
           makeTurnInput({
@@ -2176,6 +2211,10 @@ describe("AcpAdapterV2", () => {
         const lastTerminal = Option.getOrThrow(resumedTerminal);
         assert.equal(lastTerminal.type, "turn.terminal");
         if (lastTerminal.type === "turn.terminal") assert.equal(lastTerminal.status, "completed");
+        const restoredRequest = JSON.parse(
+          yield* fs.readFileString(path.join(fixture, "paths-RESUME.json")),
+        );
+        assert.equal(restoredRequest.reasoningEffort, "high");
         for (const [index, marker] of ["ALLOW", "REJECT", "ASK", "PLAN"].entries()) {
           const turnPolicy =
             marker === "PLAN"

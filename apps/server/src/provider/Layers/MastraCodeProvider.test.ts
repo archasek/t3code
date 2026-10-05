@@ -26,7 +26,9 @@ const runtimeInfo = {
     elicitation: true,
     images: true,
   },
-  models: [{ id: "openai-codex/gpt-5", modes: ["build", "plan"] }],
+  models: [
+    { id: "openai-codex/gpt-5", modes: ["build", "plan"], thinkingLevels: ["off", "low", "high"] },
+  ],
   auth: { provider: "openai-codex", status: "authenticated" },
 };
 
@@ -193,6 +195,14 @@ it.layer(NodeServices.layer)("checkMastraCodeProviderStatus", (it) => {
         expect(snapshot.status).toBe("ready");
         expect(snapshot.supportsTextGeneration).toBe(false);
         expect(snapshot.models).toMatchObject([{ slug: "openai-codex/gpt-5", isDefault: true }]);
+        expect(snapshot.models[0]?.capabilities?.optionDescriptors).toMatchObject([
+          {
+            id: "thought_level",
+            label: "Reasoning effort",
+            type: "select",
+            options: [{ id: "off" }, { id: "low" }, { id: "high" }],
+          },
+        ]);
       }),
     ),
   );

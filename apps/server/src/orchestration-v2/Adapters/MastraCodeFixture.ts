@@ -24,7 +24,8 @@ import { basename, dirname, join } from 'node:path';
 const cliPath = ${JSON.stringify(cliPath)};
 const fixtureRoot = process.env.T3_MASTRA_CODE_FIXTURE_DIR;
 const codexEndpoint = 'https://chatgpt.com/backend-api/codex/responses';
-if (!fixtureRoot || !process.env.MASTRA_APP_DATA_DIR || !process.env.MASTRA_DB_PATH) {
+const isInfoCommand = process.argv[2] === 'info';
+if (!fixtureRoot || !process.env.MASTRA_APP_DATA_DIR || (!isInfoCommand && !process.env.MASTRA_DB_PATH)) {
   throw new Error('Mastra Code test isolation paths are missing.');
 }
 
@@ -160,7 +161,7 @@ function responseForTool(marker) {
 globalThis.fetch = async (input, init) => {
   const url = new URL(input instanceof Request ? input.url : String(input));
   // The native model catalog reads public gateway metadata even without gateway credentials.
-  // Return an empty catalog locally; do not permit a real gateway request or model route.
+  // Supply bounded public metadata locally; never permit a real gateway request.
   if (url.href === 'https://api.netlify.com/api/v1/ai-gateway/providers' || url.href === 'https://models.dev/api.json') {
     const method = init?.method ?? (input instanceof Request ? input.method : 'GET');
     const headers = new Headers(input instanceof Request ? input.headers : undefined);
@@ -168,7 +169,14 @@ globalThis.fetch = async (input, init) => {
     if (method !== 'GET' || headers.has('authorization') || init?.body) return blockedNetwork();
     const netlifyCatalog = url.hostname === 'api.netlify.com';
     await writeMarker(netlifyCatalog ? 'metadata-netlify-catalog' : 'metadata-models-dev-catalog');
-    return Response.json(netlifyCatalog ? { providers: {} } : {});
+    return Response.json(netlifyCatalog ? { providers: {} } : {
+      openai: {
+        id: 'openai', name: 'OpenAI', npm: '@ai-sdk/openai',
+        api: 'https://api.openai.com/v1', env: ['OPENAI_API_KEY'],
+        models: Object.fromEntries(['gpt-5.4-mini', 'gpt-5.6-sol', 'gpt-6.1-sol'].map(id =>
+          [id, { id, modalities: { input: ['text'], output: ['text'] } }])),
+      },
+    });
   }
   if (url.href !== codexEndpoint) return blockedNetwork();
   const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
@@ -194,6 +202,7 @@ globalThis.fetch = async (input, init) => {
     storageBackend: process.env.MASTRA_STORAGE_BACKEND,
     databaseUrl: process.env.MASTRA_DB_URL,
     endpoint: url.pathname,
+    reasoningEffort: payload.reasoning?.effort,
   };
   await writeFile(join(fixtureRoot, 'paths-' + marker + '.json'), JSON.stringify(metadata), { mode: 0o600 });
   await writeMarker('request-' + marker + '.started');
