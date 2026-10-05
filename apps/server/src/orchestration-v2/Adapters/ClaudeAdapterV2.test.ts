@@ -126,6 +126,7 @@ function makeClaudeTestTurnInput(input: {
   readonly text: string;
   readonly attachments: ProviderAdapterV2TurnInput["message"]["attachments"];
   readonly providerTurnOrdinal?: number;
+  readonly nativeThreadHasTurns?: boolean;
   readonly messageCreatedBy?: ProviderAdapterV2TurnInput["message"]["createdBy"];
   readonly messageCreationSource?: ProviderAdapterV2TurnInput["message"]["creationSource"];
   readonly modelSelection?: ModelSelection;
@@ -137,6 +138,9 @@ function makeClaudeTestTurnInput(input: {
     runId: RunId.make(`run-${input.attemptId}`),
     runOrdinal: 1,
     providerTurnOrdinal: input.providerTurnOrdinal ?? 1,
+    ...(input.nativeThreadHasTurns === undefined
+      ? {}
+      : { nativeThreadHasTurns: input.nativeThreadHasTurns }),
     attemptId: input.attemptId,
     rootNodeId: NodeId.make(`node-${input.attemptId}`),
     providerThread: input.providerThread,
@@ -1783,7 +1787,7 @@ describe("ClaudeAdapterV2 native fork", () => {
 });
 
 describe("ClaudeAdapterV2 native session identity", () => {
-  const openTurnWithOrdinal = (providerTurnOrdinal: number) =>
+  const openTurnWithOrdinal = (providerTurnOrdinal: number, nativeThreadHasTurns?: boolean) =>
     Effect.scoped(
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -1842,6 +1846,7 @@ describe("ClaudeAdapterV2 native session identity", () => {
             text: "Respond with identity ok",
             attachments: [],
             providerTurnOrdinal,
+            ...(nativeThreadHasTurns === undefined ? {} : { nativeThreadHasTurns }),
           }),
         );
         return openedQueries;
@@ -1866,6 +1871,14 @@ describe("ClaudeAdapterV2 native session identity", () => {
         assert.equal(openedQueries[0]?.options.resume, "native-session-identity");
         assert.equal(openedQueries[0]?.options.sessionId, undefined);
       }),
+  );
+
+  it.effect("creates a fresh native session despite earlier provider-thread turns", () =>
+    Effect.gen(function* () {
+      const openedQueries = yield* openTurnWithOrdinal(4, false);
+      assert.equal(openedQueries[0]?.options.sessionId, "native-session-identity");
+      assert.equal(openedQueries[0]?.options.resume, undefined);
+    }),
   );
 });
 
@@ -2181,6 +2194,68 @@ describe("ClaudeAdapterV2 background wake turns", () => {
       };
     });
   const makeWakeHarness = makeWakeHarnessWithOptions();
+
+  it.effect(
+    "reuses a background shell's query for omitted and explicit Normal, but blocks Fast",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const normal = {
+            instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
+            model: "claude-opus-5-5",
+          } satisfies ModelSelection;
+          const turn = (ordinal: number, modelSelection: ModelSelection) =>
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make(`attempt-normal-background:${ordinal}`),
+              text: `Request ${ordinal}`,
+              attachments: [],
+              providerTurnOrdinal: ordinal,
+              modelSelection,
+            });
+          yield* harness.runtime.startTurn(turn(1, normal));
+          const originalOptions = harness.getOpenedOptions();
+          yield* harness.offerAndWait(wakeTaskStarted);
+          yield* harness.offerAndWait(turnOneResult);
+          yield* Queue.take(harness.terminalReceipts);
+          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+
+          yield* harness.runtime.startTurn(
+            turn(2, {
+              ...normal,
+              options: [{ id: "fastMode", value: false }],
+            }),
+          );
+          assert.strictEqual(harness.getOpenedOptions(), originalOptions);
+          assert.lengthOf(harness.offeredMessages, 2);
+          yield* harness.offerAndWait(turnOneResult);
+          yield* Queue.take(harness.terminalReceipts);
+
+          const refused = yield* harness.runtime
+            .startTurn(
+              turn(3, {
+                ...normal,
+                options: [{ id: "fastMode", value: true }],
+              }),
+            )
+            .pipe(Effect.result);
+          assert.equal(refused._tag, "Failure");
+          if (refused._tag === "Failure") {
+            assert.instanceOf(
+              refused.failure.cause,
+              ClaudeAdapterV2.ClaudeBackgroundWorkBlocksQueryReplacementError,
+            );
+          }
+          assert.strictEqual(harness.getOpenedOptions(), originalOptions);
+          assert.lengthOf(harness.offeredMessages, 2);
+          assert.isTrue(yield* harness.hasPendingBackgroundWork);
+        }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+      ),
+  );
 
   it.effect.each(["completed", "interrupted"] as const)(
     "projects Claude thinking blocks when %s",
@@ -4323,6 +4398,89 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
         }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
       ),
+  );
+
+  it.effect("stores a Bash result's stdout and stderr as command output", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const attemptId = RunAttemptId.make("attempt-claude-bash-output");
+        const bashToolUseId = "toolu_01BashOutput";
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId,
+            text: "Run it.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "assistant",
+            message: {
+              model: "claude-sonnet-4-6",
+              id: "msg_bash_output",
+              type: "message",
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: bashToolUseId,
+                  name: "Bash",
+                  input: { command: "git status" },
+                },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000790",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "user",
+            message: {
+              role: "user",
+              content: [
+                { type: "tool_result", tool_use_id: bashToolUseId, content: "On branch main" },
+              ],
+            },
+            parent_tool_use_id: null,
+            uuid: "00000000-0000-4000-8000-000000000791",
+            session_id: WAKE_NATIVE_SESSION,
+            tool_use_result: {
+              stdout: "On branch main",
+              stderr: "warning: dirty",
+              interrupted: false,
+              isImage: false,
+            },
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({ uuid: "00000000-0000-4000-8000-000000000792", result: "Done." }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "turn terminal");
+
+        const bash = harness.events.findLast(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.nativeItemRef?.nativeId === bashToolUseId,
+        );
+        assert.equal(
+          bash?.type === "turn_item.updated" && bash.turnItem.type === "command_execution"
+            ? bash.turnItem.output
+            : undefined,
+          "On branch main\nwarning: dirty",
+        );
+      }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+    ),
   );
 
   it.effect("answers an approval a held wake turn raises without waiting for the echo", () =>
