@@ -1,5 +1,6 @@
-import { ThreadId } from "@t3tools/contracts";
+import { OrchestrationV2UserInputQuestion, ThreadId, UserInputQuestion } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as AcpErrors from "effect-acp/errors";
@@ -16,6 +17,11 @@ import {
   acquireMastraCodeFormAdmission,
   validateMastraCodeStringConstraints,
 } from "./MastraCodeElicitationValidation.ts";
+
+const encodeRuntimeQuestion = Schema.encodeEffect(UserInputQuestion);
+const decodeRuntimeQuestion = Schema.decodeEffect(UserInputQuestion);
+const encodeOrchestrationQuestion = Schema.encodeEffect(OrchestrationV2UserInputQuestion);
+const decodeOrchestrationQuestion = Schema.decodeEffect(OrchestrationV2UserInputQuestion);
 
 function form(requestedSchema: unknown) {
   return prepareMastraCodeForm(
@@ -161,7 +167,11 @@ describe("MastraCodeForm", () => {
         },
         required: ["choices"],
       });
-      expect(prepared.questions[0]?.options.map((option) => option.value)).toEqual(["a", "b"]);
+      expect(
+        prepared.questions[0]?.options
+          .filter((option) => !option.exclusive)
+          .map((option) => option.value),
+      ).toEqual(["a", "b"]);
       expect(yield* prepared.respond({ choices: ["b"] })).toEqual({
         action: "accept",
         content: { choices: ["b"] },
@@ -337,7 +347,7 @@ it.effect("keeps omission sentinel collision-safe and sends exactly omission", (
     const prepared = yield* form({
       properties: { tags: { type: "array", items: { enum: ["request-1:omit:tags", "x"] } } },
     });
-    const skip = prepared.questions[0]!.options.find((option) => option.exclusive)!;
+    const skip = prepared.questions[0]!.options.find((option) => option.label === "Leave unset")!;
     expect(skip.value).toBe("request-1:omit:tags:omit");
     expect(yield* prepared.respond({ tags: [skip.value!] })).toEqual({
       action: "accept",
@@ -379,5 +389,153 @@ it.effect("hides unknown empty eligibility while preserving literal replies", ()
       action: "accept",
       content: { value: " raw\n" },
     });
+  }),
+);
+
+it.effect.each(["enum", "oneOf", "array-enum", "array-anyOf"] as const)(
+  "encodes visible labels and preserves exact native choices (%s)",
+  (kind) =>
+    Effect.gen(function* () {
+      const values = ["", " \t", "  ordinary  ", "named"];
+      const titled = values.map((value) => ({
+        const: value,
+        title: value === "named" ? "  Display  " : " \t",
+      }));
+      const array = kind.startsWith("array-");
+      const property =
+        kind === "enum"
+          ? { type: "string", enum: values }
+          : kind === "oneOf"
+            ? { type: "string", oneOf: titled }
+            : {
+                type: "array",
+                items: kind === "array-enum" ? { enum: values } : { anyOf: titled },
+              };
+      const prepared = yield* form({ properties: { choice: property }, required: ["choice"] });
+      const question = prepared.questions[0]!;
+      const labels = [
+        '""',
+        '" \\t"',
+        "ordinary",
+        kind === "oneOf" || kind === "array-anyOf" ? "Display" : "named",
+      ];
+      const encodedRuntimeQuestion = yield* encodeRuntimeQuestion(question);
+      const decodedRuntimeQuestion = yield* decodeRuntimeQuestion(encodedRuntimeQuestion);
+      const encodedOrchestrationQuestion = yield* encodeOrchestrationQuestion(question);
+      const decodedOrchestrationQuestion = yield* decodeOrchestrationQuestion(
+        encodedOrchestrationQuestion,
+      );
+      for (const decoded of [decodedRuntimeQuestion, decodedOrchestrationQuestion]) {
+        expect(
+          decoded.options.filter((option) => !option.exclusive).map((option) => option.label),
+        ).toEqual(labels);
+        expect(
+          decoded.options.filter((option) => !option.exclusive).map((option) => option.value),
+        ).toEqual(values);
+      }
+      for (const value of values) {
+        expect(yield* prepared.respond({ choice: [value] })).toEqual({
+          action: "accept",
+          content: { choice: array ? [value] : value },
+        });
+      }
+    }),
+);
+
+it.effect.each([undefined, 0, 1])(
+  "offers explicit empty arrays only when minItems permits them (%s)",
+  (minItems) =>
+    Effect.gen(function* () {
+      const prepared = yield* form({
+        properties: { tags: { type: "array", items: { enum: [""] }, minItems } },
+        required: ["tags"],
+      });
+      const empty = prepared.questions[0]!.options.find(
+        (option) => option.label === "Use empty array",
+      );
+      expect(yield* prepared.respond({})).toEqual({ action: "cancel" });
+      expect(yield* prepared.respond({ tags: [""] })).toEqual({
+        action: "accept",
+        content: { tags: [""] },
+      });
+      if (minItems === 1) {
+        expect(empty).toBeUndefined();
+        expect(yield* prepared.respond({ tags: ["request-1:empty-array:tags"] })).toEqual({
+          action: "cancel",
+        });
+      } else {
+        expect(empty?.exclusive).toBe(true);
+        expect(empty?.value).not.toBe("");
+        yield* encodeOrchestrationQuestion(prepared.questions[0]!);
+        expect(yield* prepared.respond({ tags: [empty!.value!] })).toEqual({
+          action: "accept",
+          content: { tags: [] },
+        });
+        expect(yield* prepared.respond({ tags: empty!.value! })).toEqual({
+          action: "accept",
+          content: { tags: [] },
+        });
+      }
+    }),
+);
+
+it.effect("distinguishes optional omission, empty arrays and colliding native array items", () =>
+  Effect.gen(function* () {
+    const values = [
+      "",
+      " \t",
+      "request-1:empty-array:tags",
+      "request-1:empty-array:tags:empty-array",
+      "request-1:omit:tags",
+      "request-1:omit:tags:omit",
+    ];
+    const prepared = yield* form({
+      properties: {
+        tags: { type: "array", items: { anyOf: values.map((value) => ({ const: value })) } },
+      },
+    });
+    const options = prepared.questions[0]!.options;
+    const empty = options.find((option) => option.label === "Use empty array")!.value!;
+    const omit = options.find((option) => option.label === "Leave unset")!.value!;
+    expect(empty).toBe("request-1:empty-array:tags:empty-array:empty-array");
+    expect(omit).toBe("request-1:omit:tags:omit:omit");
+    expect(empty).not.toBe(omit);
+    expect(yield* prepared.respond({ tags: [empty] })).toEqual({
+      action: "accept",
+      content: { tags: [] },
+    });
+    expect(yield* prepared.respond({ tags: [omit] })).toEqual({ action: "accept", content: {} });
+    for (const value of values) {
+      expect(yield* prepared.respond({ tags: [value] })).toEqual({
+        action: "accept",
+        content: { tags: [value] },
+      });
+    }
+    for (const mixed of [
+      [empty, ""],
+      ["", empty],
+      [empty, omit],
+      [omit, empty],
+      [empty, empty],
+    ]) {
+      expect(yield* prepared.respond({ tags: mixed })).toEqual({ action: "cancel" });
+    }
+  }),
+);
+
+it.effect("validates explicit empty arrays through the existing item limits", () =>
+  Effect.gen(function* () {
+    const prepared = yield* form({
+      properties: { tags: { type: "array", items: { enum: ["x"] }, maxItems: 0 } },
+      required: ["tags"],
+    });
+    const empty = prepared.questions[0]!.options.find(
+      (option) => option.label === "Use empty array",
+    )!;
+    expect(yield* prepared.respond({ tags: [empty.value!] })).toEqual({
+      action: "accept",
+      content: { tags: [] },
+    });
+    expect(yield* prepared.respond({ tags: ["x"] })).toEqual({ action: "cancel" });
   }),
 );

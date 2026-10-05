@@ -2454,3 +2454,66 @@ it("mobile omission clears choices and real choices clear omission", () => {
   draft = togglePendingUserInputOptionSelection(question, draft, "omit");
   expect(buildPendingUserInputAnswers([question], { [question.id]: draft })).toBeNull();
 });
+
+it.each(["", " \t"])("completes an exact native string choice %j", (value) => {
+  const question = {
+    id: "choice",
+    header: "Choice",
+    question: "Choose a value",
+    multiSelect: false,
+    allowCustomAnswer: false,
+    options: [
+      { label: '""', description: "Empty string", value: "" },
+      { label: '" \\t"', description: "Whitespace string", value: " \t" },
+    ],
+  };
+  expect(buildPendingUserInputAnswers([question], {})).toBeNull();
+  const draft = togglePendingUserInputOptionSelection(question, undefined, value);
+  expect(buildPendingUserInputAnswers([question], { choice: draft })).toEqual({ choice: value });
+  const selectedAgain = togglePendingUserInputOptionSelection(question, draft, value);
+  expect(buildPendingUserInputAnswers([question], { choice: selectedAgain })).toEqual({
+    choice: value,
+  });
+});
+
+it("builds distinct empty-array, real-item and omission answers with exclusive toggles", () => {
+  const empty = "request-1:empty-array:tags";
+  const omit = "request-1:omit:tags";
+  const question = {
+    id: "tags",
+    header: "Tags",
+    question: "Choose tags",
+    multiSelect: true,
+    allowCustomAnswer: false,
+    options: [
+      { label: '""', description: "Empty string item", value: "" },
+      { label: '" \\t"', description: "Whitespace item", value: " \t" },
+      { label: "X", description: "Real item", value: "x" },
+      { label: "Use empty array", description: "No items", value: empty, exclusive: true },
+      { label: "Leave unset", description: "Omit property", value: omit, exclusive: true },
+    ],
+  };
+  expect(buildPendingUserInputAnswers([question], {})).toBeNull();
+  let draft = togglePendingUserInputOptionSelection(question, undefined, "");
+  expect(buildPendingUserInputAnswers([question], { tags: draft })).toEqual({ tags: [""] });
+  draft = togglePendingUserInputOptionSelection(question, draft, " \t");
+  expect(buildPendingUserInputAnswers([question], { tags: draft })).toEqual({ tags: ["", " \t"] });
+  for (const [value, expected] of [
+    [empty, [empty]],
+    ["x", ["x"]],
+    [omit, [omit]],
+    [empty, [empty]],
+    [omit, [omit]],
+    ["", [""]],
+    ["", null],
+    [empty, [empty]],
+    [empty, null],
+    [omit, [omit]],
+    [omit, null],
+  ] as const) {
+    draft = togglePendingUserInputOptionSelection(question, draft, value);
+    expect(buildPendingUserInputAnswers([question], { tags: draft })).toEqual(
+      expected === null ? null : { tags: expected },
+    );
+  }
+});

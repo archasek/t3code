@@ -60,18 +60,27 @@ const formSchema = Schema.Struct({
   required: Schema.optional(Schema.NullOr(Schema.Array(Schema.String))),
 });
 
+const encodeStringLiteral = Schema.encodeSync(Schema.fromJsonString(Schema.String));
+
+function elicitationEnumLabel(value: string, title?: string): string {
+  return text(title) ?? text(value) ?? encodeStringLiteral(value);
+}
+
 function elicitationEnumOptions(property: FormProperty) {
   if (property.type === "string")
     return (
-      property.enum?.map((value) => ({ value, label: value })) ??
-      property.oneOf?.map((entry) => ({ value: entry.const, label: entry.title ?? entry.const }))
+      property.enum?.map((value) => ({ value, label: elicitationEnumLabel(value) })) ??
+      property.oneOf?.map((entry) => ({
+        value: entry.const,
+        label: elicitationEnumLabel(entry.const, entry.title),
+      }))
     );
   if (property.type === "array")
     return "enum" in property.items
-      ? property.items.enum.map((value) => ({ value, label: value }))
+      ? property.items.enum.map((value) => ({ value, label: elicitationEnumLabel(value) }))
       : property.items.anyOf.map((entry) => ({
           value: entry.const,
-          label: entry.title ?? entry.const,
+          label: elicitationEnumLabel(entry.const, entry.title),
         }));
   return undefined;
 }
@@ -84,6 +93,15 @@ function optionalElicitationSkipValue(property: FormProperty, requestId: string,
   let value = `${requestId}:omit:${id}`;
   const allowed = elicitationEnumValues(property);
   while (allowed?.includes(value)) value += ":omit";
+  return value;
+}
+
+function emptyElicitationArrayValue(property: FormProperty, requestId: string, id: string) {
+  if (property.type !== "array" || (property.minItems ?? 0) > 0) return undefined;
+  let value = `${requestId}:empty-array:${id}`;
+  const allowed = elicitationEnumValues(property);
+  const skip = optionalElicitationSkipValue(property, requestId, id);
+  while (allowed?.includes(value) || value === skip) value += ":empty-array";
   return value;
 }
 
@@ -167,6 +185,14 @@ function elicitationQuestions(
         description: text(property.description) ?? "Choose a value.",
         value,
       })) ?? [];
+    const emptyArrayValue = emptyElicitationArrayValue(property, requestId, id);
+    if (emptyArrayValue !== undefined)
+      options.push({
+        label: "Use empty array",
+        description: "Send an array with no items.",
+        value: emptyArrayValue,
+        exclusive: true,
+      });
     if (!required.has(id))
       options.push({
         label: "Leave unset",
@@ -246,8 +272,20 @@ export function prepareMastraCodeForm(
                 continue;
               }
             }
-            const value =
-              property.type !== "array" && Array.isArray(submitted)
+            const emptyArrayValue = emptyElicitationArrayValue(
+              property,
+              input.nativeRequestId,
+              key,
+            );
+            const explicitEmptyArray =
+              emptyArrayValue !== undefined &&
+              (submitted === emptyArrayValue ||
+                (Array.isArray(submitted) && submitted.includes(emptyArrayValue)));
+            if (explicitEmptyArray && Array.isArray(submitted) && submitted.length !== 1)
+              return { action: "cancel" } as const;
+            const value = explicitEmptyArray
+              ? []
+              : property.type !== "array" && Array.isArray(submitted)
                 ? submitted.length === 1
                   ? submitted[0]
                   : undefined
