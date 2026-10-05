@@ -271,6 +271,35 @@ describe("buildThreadFeed", () => {
     expect(items[0]).toMatchObject({ output: rawOutput });
   });
 
+  it("expands tool rows only when they have detail or withheld output", () => {
+    const items: OrchestrationV2TurnItem[] = [
+      { ...command(), input: "", outputOmitted: true },
+      {
+        ...base("dynamic-empty", "2026-06-20T00:00:03.000Z", 2),
+        type: "dynamic_tool",
+        toolName: "example",
+        input: {},
+      },
+      {
+        ...base("read-omitted", "2026-06-20T00:00:04.000Z", 3),
+        type: "dynamic_tool",
+        toolName: "Read",
+        input: { path: "src/env.ts" },
+        outputOmitted: true,
+      },
+    ];
+    const activities = buildThreadFeed(items.map((item, index) => projected(item, index))).flatMap(
+      (entry) => (entry.type === "activity-group" ? entry.activities : []),
+    );
+    expect(
+      activities.map(({ canExpand, fetchesDetail }) => ({ canExpand, fetchesDetail })),
+    ).toEqual([
+      { canExpand: true, fetchesDetail: true },
+      { canExpand: false, fetchesDetail: false },
+      { canExpand: true, fetchesDetail: true },
+    ]);
+  });
+
   it("recognizes automation attribution after projecting a user message", () => {
     const feed = buildThreadFeed([
       projected(
@@ -1236,6 +1265,7 @@ describe("buildThreadFeed", () => {
       summary: `Tool ${id}`,
       detail: null,
       canExpand: false,
+      fetchesDetail: false,
       getFullDetail: () => null,
       getCopyText: () => id,
       icon: "command",
@@ -1913,14 +1943,25 @@ const multiSelectQuestion = {
 } as const;
 
 describe("pending user input answers", () => {
-  it.each(["", "  ", " padded ", "first\nsecond\n"])("preserves raw MC answer %j", (customAnswer) => {
-    const question = { ...singleSelectQuestion, answerFormat: "raw-string" as const };
-    expect(buildPendingUserInputAnswers([question], {})).toBeNull();
-    const draft = setPendingUserInputCustomAnswer(question, { selectedOptionValues: ["Go"] }, customAnswer);
-    expect(buildPendingUserInputAnswers([question], { runtime: draft })).toEqual({ runtime: customAnswer });
-    const option = togglePendingUserInputOptionSelection(question, draft, "Go");
-    expect(buildPendingUserInputAnswers([question], { runtime: option })).toEqual({ runtime: "Go" });
-  });
+  it.each(["", "  ", " padded ", "first\nsecond\n"])(
+    "preserves raw MC answer %j",
+    (customAnswer) => {
+      const question = { ...singleSelectQuestion, answerFormat: "raw-string" as const };
+      expect(buildPendingUserInputAnswers([question], {})).toBeNull();
+      const draft = setPendingUserInputCustomAnswer(
+        question,
+        { selectedOptionValues: ["Go"] },
+        customAnswer,
+      );
+      expect(buildPendingUserInputAnswers([question], { runtime: draft })).toEqual({
+        runtime: customAnswer,
+      });
+      const option = togglePendingUserInputOptionSelection(question, draft, "Go");
+      expect(buildPendingUserInputAnswers([question], { runtime: option })).toEqual({
+        runtime: "Go",
+      });
+    },
+  );
   it("replaces single-select options and toggles multi-select options", () => {
     expect(
       togglePendingUserInputOptionSelection(

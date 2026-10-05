@@ -19,6 +19,7 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
   type OrchestrationV2UserInputQuestion,
+  type OrchestrationV2WebSearchResult,
   type ProviderApprovalDecision,
   type ProviderApprovalOption,
   type ProviderInstanceId,
@@ -304,12 +305,18 @@ export interface AcpAdapterV2Flavor {
     readonly request: EffectAcpSchema.RequestPermissionRequest;
     readonly threadId: ThreadId;
     readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
-  }) => Effect.Effect<{
-    readonly proposedPlanMarkdown?: string;
-  }, EffectAcpErrors.AcpError>;
+  }) => Effect.Effect<
+    {
+      readonly proposedPlanMarkdown?: string;
+    },
+    EffectAcpErrors.AcpError
+  >;
   /** Reserve native form capacity before publishing a durable user question.
    * The returned idempotent release runs when the native write settles. */
-  readonly acquireFormElicitation?: () => Effect.Effect<Effect.Effect<void>, EffectAcpErrors.AcpError>;
+  readonly acquireFormElicitation?: () => Effect.Effect<
+    Effect.Effect<void>,
+    EffectAcpErrors.AcpError
+  >;
   /** Schema projection only; waiting and cancellation remain shared. */
   readonly prepareFormElicitation?: (input: {
     readonly request: {
@@ -882,11 +889,14 @@ function textFromUnknown(value: unknown): string | undefined {
     return undefined;
   }
   // Prefer prompt-facing Grok fields before nested envelopes.
+  // Antigravity reports shell output as combinedOutput.
   for (const key of [
     "output_for_prompt",
     "stdout",
     "stderr",
     "output",
+    "combinedOutput",
+    "combined_output",
     "content",
     "text",
     "message",
@@ -1023,6 +1033,46 @@ function pathFromToolCall(toolCall: AcpToolCallState): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Grok runs X and web searches server-side as `search` tools whose rawInput is
+ * only `{ variant: "XSearch" | "WebSearch", backend: true }`. The query arrives
+ * with completion: web searches report `action: { query, sources }`, X searches
+ * the backend call `{ name, input }` with JSON-encoded arguments.
+ */
+function acpBackendWebSearch(
+  rawInput: Record<string, unknown> | undefined,
+  rawOutput: Record<string, unknown> | undefined,
+):
+  | { readonly query: string | undefined; readonly results: OrchestrationV2WebSearchResult[] }
+  | undefined {
+  const variant = typeof rawInput?.variant === "string" ? rawInput.variant.toLowerCase() : "";
+  const action = unknownRecord(rawOutput?.action);
+  if (variant !== "xsearch" && variant !== "websearch" && action?.type !== "search") {
+    return undefined;
+  }
+  let args: Record<string, unknown> | undefined;
+  if (typeof rawOutput?.input === "string") {
+    try {
+      args = unknownRecord(JSON.parse(rawOutput.input));
+    } catch {
+      args = undefined;
+    }
+  }
+  const argsText = Object.entries(args ?? {})
+    .filter(([, value]) => typeof value === "string" || typeof value === "number")
+    .map(([key, value]) => `${key}: ${value}`)
+    .join(", ");
+  const query = [action?.query, args?.query, argsText]
+    .find((value): value is string => typeof value === "string" && value.trim().length > 0)
+    ?.trim();
+  const urls = new Set<string>();
+  for (const source of Array.isArray(action?.sources) ? action.sources : []) {
+    const url = unknownRecord(source)?.url;
+    if (typeof url === "string" && url.trim().length > 0) urls.add(url.trim());
+  }
+  return { query, results: [...urls].map((url) => ({ url })) };
 }
 
 function providerRequestKind(kind: string | "unknown"): ProviderRequestKind {
@@ -3334,7 +3384,30 @@ export function makeAcpAdapterV2(
                   ...(rawOutput === undefined ? {} : { output: rawOutput }),
                 };
                 break;
-              case "search":
+              case "search": {
+                const backendSearch = acpBackendWebSearch(rawInputRecord, rawOutputRecord);
+                if (backendSearch !== undefined) {
+                  // Grok titles these "X search:" / "Web search:" awaiting the query.
+                  const label = nonEmptyText(toolCall.data.title, title ?? "Web search").replace(
+                    /:\s*$/u,
+                    "",
+                  );
+                  turnItem = {
+                    ...base,
+                    title:
+                      backendSearch.query === undefined
+                        ? label
+                        : `${label}: ${backendSearch.query}`,
+                    type: "web_search",
+                    ...(backendSearch.query === undefined
+                      ? {}
+                      : { patterns: [backendSearch.query] }),
+                    ...(backendSearch.results.length === 0
+                      ? {}
+                      : { results: backendSearch.results }),
+                  };
+                  break;
+                }
                 turnItem = {
                   ...base,
                   title:
@@ -3359,6 +3432,7 @@ export function makeAcpAdapterV2(
                       }),
                 };
                 break;
+              }
               case "execute": {
                 const exitCode = acpProjectedCommandExitCode(status, rawOutput);
                 turnItem = {
@@ -3382,7 +3456,11 @@ export function makeAcpAdapterV2(
                   ...(diffText === undefined ? {} : { diffStr: diffText }),
                 };
                 break;
-              case "fetch":
+              case "fetch": {
+                // Grok nests the page under rawOutput.Content, which textFromUnknown
+                // cannot read; the (bounded) content blocks carry the same text.
+                const snippet =
+                  textFromUnknown(toolCall.data.content) ?? textFromUnknown(rawOutput);
                 turnItem = {
                   ...base,
                   type: "web_search",
@@ -3393,14 +3471,13 @@ export function makeAcpAdapterV2(
                         results: [
                           {
                             url: path,
-                            ...(textFromUnknown(rawOutput) === undefined
-                              ? {}
-                              : { snippet: textFromUnknown(rawOutput) }),
+                            ...(snippet === undefined ? {} : { snippet }),
                           },
                         ],
                       }),
                 };
                 break;
+              }
               default:
                 if (projectAsCommandExecution) {
                   const exitCode = acpProjectedCommandExitCode(status, rawOutput);
@@ -4644,7 +4721,10 @@ export function makeAcpAdapterV2(
             nativeRequestId,
           });
           const decision = yield* Deferred.make<ProviderApprovalDecision>();
-          const nativeResponseAcknowledgement = yield* Deferred.make<void, EffectAcpErrors.AcpError>();
+          const nativeResponseAcknowledgement = yield* Deferred.make<
+            void,
+            EffectAcpErrors.AcpError
+          >();
           yield* registerNativeResponseAcknowledgement(
             generation,
             transportRequestId,
@@ -4763,10 +4843,13 @@ export function makeAcpAdapterV2(
             nativeRequestId: request.nativeRequestId,
           });
           const answers = yield* Deferred.make<ProviderUserInputAnswers | null>();
-          const existingAcknowledgement = (yield* Ref.get(nativeResponseAcknowledgements)).get(transportRequestId);
-          const nativeResponseAcknowledgement = existingAcknowledgement?.generation === generation
-            ? existingAcknowledgement.acknowledgement
-            : yield* Deferred.make<void, EffectAcpErrors.AcpError>();
+          const existingAcknowledgement = (yield* Ref.get(nativeResponseAcknowledgements)).get(
+            transportRequestId,
+          );
+          const nativeResponseAcknowledgement =
+            existingAcknowledgement?.generation === generation
+              ? existingAcknowledgement.acknowledgement
+              : yield* Deferred.make<void, EffectAcpErrors.AcpError>();
           yield* registerNativeResponseAcknowledgement(
             generation,
             transportRequestId,
@@ -5362,8 +5445,7 @@ export function makeAcpAdapterV2(
                 flavor.onAvailableCommandsUpdate?.(
                   notification.update.availableCommands,
                   input.runtimePolicy.cwd ?? process.cwd(),
-                ) ??
-                  Effect.void
+                ) ?? Effect.void
               );
             }
             if (
@@ -5536,19 +5618,21 @@ export function makeAcpAdapterV2(
           yield* targetRuntime.handleRequestPermission((params, requestContext) =>
             Effect.gen(function* () {
               const transportRequestId = requestContext.requestId;
-              const preparationContext = flavor.preparePermissionRequest === undefined
-                ? undefined
-                : yield* runRuntimeCallbackAtGeneration(handlerGeneration, activeContext);
+              const preparationContext =
+                flavor.preparePermissionRequest === undefined
+                  ? undefined
+                  : yield* runRuntimeCallbackAtGeneration(handlerGeneration, activeContext);
               if (preparationContext !== undefined && Option.isNone(preparationContext)) {
                 return yield* Effect.never;
               }
-              const prepared = preparationContext !== undefined && Option.isSome(preparationContext)
-                ? yield* flavor.preparePermissionRequest!({
-                    request: params,
-                    threadId: preparationContext.value.input.threadId,
-                    runtimePolicy: preparationContext.value.input.runtimePolicy,
-                  })
-                : undefined;
+              const prepared =
+                preparationContext !== undefined && Option.isSome(preparationContext)
+                  ? yield* flavor.preparePermissionRequest!({
+                      request: params,
+                      threadId: preparationContext.value.input.threadId,
+                      runtimePolicy: preparationContext.value.input.runtimePolicy,
+                    })
+                  : undefined;
               const permissionQuestion = flavor.extractPermissionQuestion?.(params);
               if (permissionQuestion !== undefined) {
                 const userInput = yield* requestUserInputWithAdmission(
@@ -5576,10 +5660,14 @@ export function makeAcpAdapterV2(
                   if (preparationContext !== undefined && Option.isSome(preparationContext)) {
                     if (
                       context !== preparationContext.value ||
-                      context.interrupted || context.finalized ||
+                      context.interrupted ||
+                      context.finalized ||
                       context.nativeThreadId !== params.sessionId
                     ) {
-                      return { _tag: "Immediate" as const, response: { outcome: { outcome: "cancelled" } } as const };
+                      return {
+                        _tag: "Immediate" as const,
+                        response: { outcome: { outcome: "cancelled" } } as const,
+                      };
                     }
                     if (prepared?.proposedPlanMarkdown !== undefined) {
                       yield* captureProposedPlan({ planMarkdown: prepared.proposedPlanMarkdown });
@@ -5784,7 +5872,9 @@ export function makeAcpAdapterV2(
               const elicitationScopeId =
                 "sessionId" in params ? params.sessionId : `request:${params.requestId}`;
               let formContext: ActiveAcpTurn | undefined;
-              let preparedForm: ReturnType<NonNullable<AcpAdapterV2Flavor["prepareFormElicitation"]>> | undefined;
+              let preparedForm:
+                | ReturnType<NonNullable<AcpAdapterV2Flavor["prepareFormElicitation"]>>
+                | undefined;
               const questions = Object.entries(properties).map(
                 ([id, property], index): OrchestrationV2UserInputQuestion => {
                   const record = unknownRecord(property);
@@ -5819,7 +5909,8 @@ export function makeAcpAdapterV2(
                   if (flavor.prepareFormElicitation !== undefined) {
                     formContext = yield* activeContext;
                     if (
-                      formContext.interrupted || formContext.finalized ||
+                      formContext.interrupted ||
+                      formContext.finalized ||
                       ("sessionId" in params && params.sessionId !== formContext.nativeThreadId)
                     ) {
                       return yield* new EffectAcpErrors.AcpTransportError({
@@ -5828,20 +5919,33 @@ export function makeAcpAdapterV2(
                       });
                     }
                     if (flavor.acquireFormElicitation !== undefined) {
-                      yield* Effect.uninterruptible(Effect.gen(function* () {
-                        const release = yield* flavor.acquireFormElicitation!();
-                        const acknowledgement = yield* Deferred.make<void, EffectAcpErrors.AcpError>();
-                        yield* registerNativeResponseAcknowledgement(handlerGeneration, transportRequestId, acknowledgement);
-                        yield* Deferred.await(acknowledgement).pipe(
-                          Effect.ensuring(release),
-                          Effect.ignore,
-                          Effect.interruptible,
-                          Effect.forkIn(sessionScope),
-                        );
-                      }));
+                      yield* Effect.uninterruptible(
+                        Effect.gen(function* () {
+                          const release = yield* flavor.acquireFormElicitation!();
+                          const acknowledgement = yield* Deferred.make<
+                            void,
+                            EffectAcpErrors.AcpError
+                          >();
+                          yield* registerNativeResponseAcknowledgement(
+                            handlerGeneration,
+                            transportRequestId,
+                            acknowledgement,
+                          );
+                          yield* Deferred.await(acknowledgement).pipe(
+                            Effect.ensuring(release),
+                            Effect.ignore,
+                            Effect.interruptible,
+                            Effect.forkIn(sessionScope),
+                          );
+                        }),
+                      );
                     }
                     preparedForm = flavor.prepareFormElicitation({
-                      request: { mode: "form", message: params.message, requestedSchema: params.requestedSchema },
+                      request: {
+                        mode: "form",
+                        message: params.message,
+                        requestedSchema: params.requestedSchema,
+                      },
                       nativeRequestId,
                       threadId: formContext.input.threadId,
                     });
@@ -5854,25 +5958,33 @@ export function makeAcpAdapterV2(
                 }),
                 transportRequestId,
               );
-              const response = preparedForm !== undefined
-                ? yield* preparedForm.respond(userInput.answers)
-                : userInput.answers === null
-                  ? ({ action: "cancel" } as const)
-                  : ({
-                      action: "accept",
-                      content: elicitationContent(
-                        userInput.answers,
-                        new Set(Object.keys(properties)),
-                      ),
-                    } as const);
-              const checked = preparedForm === undefined
-                ? Option.some(response)
-                : yield* runRuntimeCallbackAtGeneration(handlerGeneration, Effect.gen(function* () {
-                    const current = yield* Ref.get(activeTurn);
-                    return current === formContext && current !== null && !current.interrupted && !current.finalized
-                      ? response
-                      : ({ action: "cancel" } as const);
-                  }));
+              const response =
+                preparedForm !== undefined
+                  ? yield* preparedForm.respond(userInput.answers)
+                  : userInput.answers === null
+                    ? ({ action: "cancel" } as const)
+                    : ({
+                        action: "accept",
+                        content: elicitationContent(
+                          userInput.answers,
+                          new Set(Object.keys(properties)),
+                        ),
+                      } as const);
+              const checked =
+                preparedForm === undefined
+                  ? Option.some(response)
+                  : yield* runRuntimeCallbackAtGeneration(
+                      handlerGeneration,
+                      Effect.gen(function* () {
+                        const current = yield* Ref.get(activeTurn);
+                        return current === formContext &&
+                          current !== null &&
+                          !current.interrupted &&
+                          !current.finalized
+                          ? response
+                          : ({ action: "cancel" } as const);
+                      }),
+                    );
               if (Option.isNone(checked)) return yield* Effect.never;
               yield* userInput.acknowledgeNativeResponse;
               return checked.value;
@@ -6385,13 +6497,21 @@ export function makeAcpAdapterV2(
           // Native MC stores models per mode, so apply the explicit model only
           // after the incoming mode has loaded its saved/default selection.
           if (flavor.applyModelSelection !== undefined) {
-            const applied = yield* flavor.applyModelSelection({ runtime, startResult, modelSelection });
+            const applied = yield* flavor.applyModelSelection({
+              runtime,
+              startResult,
+              modelSelection,
+            });
             if (applied !== undefined) {
               yield* Ref.update(activeSessionSetup, (setup) => {
                 if (setup === null || setup.sessionSetupResult.models == null) return setup;
-                return { ...setup, sessionSetupResult: { ...setup.sessionSetupResult,
-                  models: { ...setup.sessionSetupResult.models, currentModelId: applied },
-                } };
+                return {
+                  ...setup,
+                  sessionSetupResult: {
+                    ...setup.sessionSetupResult,
+                    models: { ...setup.sessionSetupResult.models, currentModelId: applied },
+                  },
+                };
               });
             }
           }

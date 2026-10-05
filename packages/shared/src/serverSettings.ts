@@ -105,7 +105,10 @@ export function resolveSourceControlWriterModelSelection(
     : settings.textGenerationModelSelection;
 }
 
-export function isModelSelectionTextGenerationCapable(settings: ServerSettings, selection: ModelSelection): boolean {
+export function isModelSelectionTextGenerationCapable(
+  settings: ServerSettings,
+  selection: ModelSelection,
+): boolean {
   const driver = settings.providerInstances[selection.instanceId]?.driver ?? selection.instanceId;
   return driver !== "mastraCode" && driver !== "acpRegistry";
 }
@@ -288,6 +291,7 @@ export function applyServerSettingsPatch(
     // Merged per entry below; its `null` removals must not reach deepMerge.
     usageLimitSources: usageLimitSourcesPatch,
     usagePriceOverrides: usagePriceOverridesPatch,
+    usageModelAliases: usageModelAliasesPatch,
     // Entry replacement: deepMerge would keep keys the client meant to clear.
     projectSettingsOverrides: projectSettingsOverridesPatch,
     // Already translated into `projectSettingsOverrides` above; the legacy
@@ -399,6 +403,14 @@ export function applyServerSettingsPatch(
           usagePriceOverrides: mergeSettingsEntries(
             current.usagePriceOverrides,
             usagePriceOverridesPatch,
+          ),
+        }
+      : {}),
+    ...(usageModelAliasesPatch !== undefined
+      ? {
+          usageModelAliases: mergeSettingsEntries(
+            current.usageModelAliases,
+            usageModelAliasesPatch,
           ),
         }
       : {}),
