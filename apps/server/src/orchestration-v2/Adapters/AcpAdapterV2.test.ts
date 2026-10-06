@@ -2077,13 +2077,50 @@ describe("AcpAdapterV2", () => {
               expires: 4_102_444_800_000,
               accountId: "test-only-account",
             },
+            "accounts:openai-codex:integration-fixture": {
+              type: "oauth-account",
+              id: "openai-codex:integration-fixture",
+              label: "Isolated integration fixture",
+              addedAt: "2026-10-06T00:00:00.000Z",
+              active: true,
+              access: "test-only-synthetic-access-token",
+              refresh: "test-only-synthetic-refresh-token",
+              expires: 4_102_444_800_000,
+              accountId: "test-only-account",
+            },
           }),
         );
         yield* fs.chmod(path.join(appDataDirectory, "auth.json"), 0o600);
+        const catalogFetchedAt = yield* Clock.currentTimeMillis;
+        yield* fs.writeFileString(
+          path.join(appDataDirectory, "openai-codex-model-catalog.json"),
+          encodeFixtureJson({
+            schemaVersion: 1,
+            provider: "openai-codex",
+            scope: {
+              kind: "registered",
+              accountInstanceId: "openai-codex:integration-fixture",
+              accountId: "test-only-account",
+            },
+            endpoint: "https://chatgpt.com/backend-api/codex/models",
+            clientVersion: "0.160.0",
+            fetchedAt: catalogFetchedAt,
+            expiresAt: catalogFetchedAt + 60 * 60 * 1000,
+            slugs: ["gpt-6.1-sol", "gpt-6-luna"],
+          }),
+        );
+        yield* fs.chmod(path.join(appDataDirectory, "openai-codex-model-catalog.json"), 0o600);
         yield* fs.writeFileString(
           path.join(appDataDirectory, "settings.json"),
           encodeFixtureJson({
             onboarding: { quietModePreferenceSelected: true },
+            models: {
+              modeDefaults: {
+                build: "openai/gpt-6.1-sol",
+                plan: "openai/gpt-6.1-sol",
+                fast: "openai/gpt-6-luna",
+              },
+            },
             observability: { resources: {}, localTracing: true },
           }),
         );
