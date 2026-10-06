@@ -20,6 +20,7 @@ import {
   buildInitialMastraCodeProviderSnapshot,
   checkMastraCodeProviderStatus,
   makeMastraCodeCommandCatalog,
+  makeMastraCodeCatalogRefresh,
 } from "../Layers/MastraCodeProvider.ts";
 import { makeMastraCodeAuth, resolveMastraCodeAppDataDirectory } from "../MastraCodeAuth.ts";
 import { buildMastraCodeEnvironment } from "../MastraCodeEnvironment.ts";
@@ -159,13 +160,23 @@ export const MastraCodeDriver: ProviderDriver<MastraCodeSettings, MastraCodeDriv
         platform,
       );
 
+      const catalogRefresh = yield* makeMastraCodeCatalogRefresh(
+        effectiveConfig,
+        providerEnvironment,
+      );
+      const refreshCatalog = (force = false) =>
+        catalogRefresh(force).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+        );
+
       const auth = yield* makeMastraCodeAuth({
         instanceId,
         binaryPath: effectiveConfig.binaryPath,
         appDataDirectory,
         environment: providerEnvironment,
         onChanged: (signedIn): Effect.Effect<void, ProviderSetupError> =>
-          managedSnapshot.refresh.pipe(
+          (signedIn ? refreshCatalog(true) : Effect.succeed(false)).pipe(
+            Effect.andThen(managedSnapshot.refresh),
             Effect.flatMap((provider) =>
               provider.auth.status === (signedIn ? "authenticated" : "unauthenticated")
                 ? Effect.void
@@ -226,6 +237,14 @@ export const MastraCodeDriver: ProviderDriver<MastraCodeSettings, MastraCodeDriv
 
       const commandCatalog = yield* makeMastraCodeCommandCatalog(managedSnapshot);
 
+      // This is one explicit existing-account bootstrap, not a passive probe.
+      if (enabled) {
+        const scope = yield* Effect.scope;
+        yield* auth.withAccess!(
+          refreshCatalog().pipe(Effect.andThen(managedSnapshot.refresh)),
+        ).pipe(Effect.ignoreCause, Effect.forkIn(scope));
+      }
+
       const orchestrationAdapter = makeMastraCodeAdapterV2({
         instanceId,
         settings: effectiveConfig,
@@ -241,7 +260,19 @@ export const MastraCodeDriver: ProviderDriver<MastraCodeSettings, MastraCodeDriv
         serverConfig,
         selfInvocation: yield* resolveSelfInvocation(),
         wrapRuntime: (task) =>
-          auth.withAccess!(task).pipe(
+          auth.withAccess!(
+            Effect.gen(function* () {
+              const usable = yield* refreshCatalog();
+              if (!usable)
+                return yield* new ProviderSetupError({
+                  instanceId,
+                  operation: "session",
+                  detail:
+                    "Mastra Code has no fresh usable account model catalog. Refresh provider status.",
+                });
+              return yield* task;
+            }),
+          ).pipe(
             Effect.mapError(
               (cause) =>
                 new AcpErrors.AcpTransportError({
@@ -260,7 +291,14 @@ export const MastraCodeDriver: ProviderDriver<MastraCodeSettings, MastraCodeDriv
         displayName,
         accentColor,
         enabled,
-        snapshot: commandCatalog.snapshot,
+        snapshot: {
+          ...commandCatalog.snapshot,
+          refresh: Effect.scoped(
+            auth.withAccess!(
+              refreshCatalog(true).pipe(Effect.andThen(commandCatalog.snapshot.refresh)),
+            ),
+          ).pipe(Effect.catch(() => commandCatalog.snapshot.refresh)),
+        },
         snapshotForCwd: commandCatalog.snapshotForCwd,
         orchestrationAdapter,
         textGeneration,

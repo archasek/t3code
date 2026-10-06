@@ -9,10 +9,12 @@ import {
 import type * as EffectAcpSchema from "effect-acp/schema";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import * as DateTime from "effect/DateTime";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
@@ -40,6 +42,15 @@ const MastraCodeInfoSchema = Schema.Struct({
   version: Schema.String,
   acpProtocolVersion: Schema.Literal(1),
   thinkingLevelDescription: Schema.optional(Schema.String),
+  catalog: Schema.optional(
+    Schema.Struct({
+      source: Schema.Literal("account-cache"),
+      status: Schema.Literals(["ready", "unbound", "missing", "invalid", "foreign", "expired"]),
+      clientVersion: Schema.String,
+      fetchedAt: Schema.optional(Schema.Number),
+      expiresAt: Schema.optional(Schema.Number),
+    }),
+  ),
   capabilities: Schema.Struct({
     loadSession: Schema.Boolean,
     permissions: Schema.Boolean,
@@ -61,6 +72,21 @@ const MastraCodeInfoSchema = Schema.Struct({
 });
 type MastraCodeInfo = typeof MastraCodeInfoSchema.Type;
 const decodeInfo = Schema.decodeUnknownOption(Schema.fromJsonString(MastraCodeInfoSchema));
+const decodeCatalogRefresh = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      type: Schema.Literal("success"),
+      provider: Schema.Literal("openai-codex"),
+      catalog: Schema.Struct({
+        source: Schema.Literal("account-cache"),
+        status: Schema.Literal("ready"),
+        clientVersion: Schema.Literal("0.160.0"),
+        fetchedAt: Schema.Number,
+        expiresAt: Schema.Number,
+      }),
+    }),
+  ),
+);
 const MAX_WORKSPACE_SNAPSHOTS = 16;
 
 function nativeCommands(
@@ -153,9 +179,112 @@ export function parseMastraCodeInfo(output: string): MastraCodeInfo | undefined 
   return Option.getOrUndefined(decodeInfo(output));
 }
 
-function modelsFromInfo(info: MastraCodeInfo | undefined): ReadonlyArray<ServerProviderModel> {
+function hasFreshCatalog(info: MastraCodeInfo | undefined, now: number): boolean {
+  const catalog = info?.catalog;
+  return (
+    info?.auth.status === "authenticated" &&
+    catalog?.status === "ready" &&
+    catalog.clientVersion === "0.160.0" &&
+    typeof catalog.fetchedAt === "number" &&
+    typeof catalog.expiresAt === "number" &&
+    Number.isFinite(catalog.fetchedAt) &&
+    Number.isFinite(catalog.expiresAt) &&
+    catalog.fetchedAt <= now &&
+    catalog.expiresAt > now &&
+    catalog.expiresAt - catalog.fetchedAt === 3_600_000
+  );
+}
+
+function collectMachineCommand(
+  settings: MastraCodeSettings,
+  environment: NodeJS.ProcessEnv,
+  args: ReadonlyArray<string>,
+  timeoutMs: number,
+) {
+  const command = settings.binaryPath || "mastracode";
+  return Effect.result(
+    Effect.gen(function* () {
+      const resolved = yield* resolveSpawnCommand(command, [...args], { env: environment });
+      return yield* spawnAndCollect(
+        command,
+        ChildProcess.make(resolved.command, resolved.args, {
+          env: environment,
+          extendEnv: false,
+          shell: resolved.shell,
+        }),
+      );
+    }).pipe(Effect.timeoutOption(timeoutMs)),
+  );
+}
+
+/** Only explicit admission/setup/refresh calls use this writer command; probes stay offline. */
+export const makeMastraCodeCatalogRefresh = Effect.fn("makeMastraCodeCatalogRefresh")(function* (
+  settings: MastraCodeSettings,
+  environment: NodeJS.ProcessEnv,
+) {
+  const semaphore = yield* Semaphore.make(1);
+  const refresh = (force = false) =>
+    semaphore.withPermits(1)(
+      Effect.gen(function* () {
+        if (!settings.enabled) return false;
+        const read = yield* collectMachineCommand(
+          settings,
+          environment,
+          ["info", "--json"],
+          INFO_TIMEOUT_MS,
+        );
+        if (Result.isFailure(read) || Option.isNone(read.success)) return false;
+        const info = parseMastraCodeInfo(read.success.value.stdout);
+        if (info?.auth.status !== "authenticated") return false;
+        if (
+          !force &&
+          read.success.value.code === 0 &&
+          hasFreshCatalog(info, yield* Clock.currentTimeMillis)
+        )
+          return true;
+        const updated = yield* collectMachineCommand(
+          settings,
+          environment,
+          ["catalog", "refresh", "--provider", "openai-codex", "--json"],
+          35_000,
+        );
+        if (
+          Result.isFailure(updated) ||
+          Option.isNone(updated.success) ||
+          updated.success.value.code !== 0
+        )
+          return false;
+        const receipt = Option.getOrUndefined(decodeCatalogRefresh(updated.success.value.stdout));
+        if (!receipt) return false;
+        const reread = yield* collectMachineCommand(
+          settings,
+          environment,
+          ["info", "--json"],
+          INFO_TIMEOUT_MS,
+        );
+        if (
+          Result.isFailure(reread) ||
+          Option.isNone(reread.success) ||
+          reread.success.value.code !== 0
+        )
+          return false;
+        const current = parseMastraCodeInfo(reread.success.value.stdout);
+        return (
+          hasFreshCatalog(current, yield* Clock.currentTimeMillis) &&
+          current?.catalog?.fetchedAt === receipt.catalog.fetchedAt &&
+          current.catalog.expiresAt === receipt.catalog.expiresAt
+        );
+      }),
+    );
+  return refresh;
+});
+
+function modelsFromInfo(
+  info: MastraCodeInfo | undefined,
+  now: number,
+): ReadonlyArray<ServerProviderModel> {
   const seen = new Set<string>();
-  const models = info?.models ?? [];
+  const models = hasFreshCatalog(info, now) ? (info?.models ?? []) : [];
   const defaultBuildModel = models
     .find(({ id, modes }) => id.trim() && (modes === undefined || modes.includes("build")))
     ?.id.trim();
@@ -226,7 +355,7 @@ function snapshot(input: {
   const info = input.info;
   const authStatus = info?.auth.status ?? "unknown";
   const models = providerModelsFromSettings(
-    modelsFromInfo(info),
+    modelsFromInfo(info, Date.parse(input.checkedAt)),
     input.settings.customModels,
     EMPTY_CAPABILITIES,
   );
@@ -283,20 +412,11 @@ export const checkMastraCodeProviderStatus = Effect.fn("checkMastraCodeProviderS
   }
 
   const command = settings.binaryPath || "mastracode";
-  const result = yield* Effect.result(
-    Effect.gen(function* () {
-      const resolved = yield* resolveSpawnCommand(command, ["info", "--json"], {
-        env: environment,
-      });
-      return yield* spawnAndCollect(
-        command,
-        ChildProcess.make(resolved.command, resolved.args, {
-          env: environment,
-          extendEnv: false,
-          shell: resolved.shell,
-        }),
-      );
-    }).pipe(Effect.timeoutOption(INFO_TIMEOUT_MS)),
+  const result = yield* collectMachineCommand(
+    settings,
+    environment,
+    ["info", "--json"],
+    INFO_TIMEOUT_MS,
   );
 
   if (Result.isFailure(result)) {
@@ -368,6 +488,18 @@ export const checkMastraCodeProviderStatus = Effect.fn("checkMastraCodeProviderS
         info.auth.status === "unknown"
           ? "Mastra Code could not verify its OpenAI Codex sign-in. Check its app data directory."
           : "Sign in to OpenAI Codex for Mastra Code from provider setup.",
+    });
+  }
+  if (!hasFreshCatalog(info, yield* Clock.currentTimeMillis)) {
+    return snapshot({
+      settings,
+      checkedAt,
+      info,
+      installed: true,
+      status: "warning",
+      message: info.catalog
+        ? "Mastra Code is signed in, but its account model catalog needs refresh."
+        : "Mastra Code returned an unverified model catalog. Update the paired runtime.",
     });
   }
   return snapshot({ settings, checkedAt, info, installed: true, status: "ready" });

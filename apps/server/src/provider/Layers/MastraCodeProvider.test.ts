@@ -1,9 +1,11 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { MastraCodeSettings, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 
 import {
@@ -11,6 +13,7 @@ import {
   checkMastraCodeProviderStatus,
   makeMastraCodeCommandCatalog,
   parseMastraCodeInfo,
+  makeMastraCodeCatalogRefresh,
 } from "./MastraCodeProvider.ts";
 import { writeFakeCli } from "../../testUtils/fakeCli.ts";
 
@@ -36,6 +39,13 @@ const runtimeInfo = {
     },
   ],
   auth: { provider: "openai-codex", status: "authenticated" },
+  catalog: {
+    source: "account-cache",
+    status: "ready",
+    clientVersion: "0.160.0",
+    fetchedAt: 0,
+    expiresAt: 3_600_000,
+  },
 };
 
 describe("parseMastraCodeInfo", () => {
@@ -171,11 +181,15 @@ it.layer(NodeServices.layer)("checkMastraCodeProviderStatus", (it) => {
       });
     });
 
-  const buildStatus = (binaryPath: string) =>
-    checkMastraCodeProviderStatus(decodeSettings({ enabled: true, binaryPath }), {
-      ...process.env,
-      MASTRA_APP_DATA_DIR: "/tmp/mastracode-test-app-data",
-    });
+  const buildStatus = (binaryPath: string, now = 0) =>
+    TestClock.setTime(now).pipe(
+      Effect.andThen(
+        checkMastraCodeProviderStatus(decodeSettings({ enabled: true, binaryPath }), {
+          ...process.env,
+          MASTRA_APP_DATA_DIR: "/tmp/mastracode-test-app-data",
+        }),
+      ),
+    );
 
   it.effect("treats valid metadata plus unknown auth as a sign-in warning", () =>
     Effect.scoped(
@@ -215,6 +229,133 @@ it.layer(NodeServices.layer)("checkMastraCodeProviderStatus", (it) => {
             currentValue: "off",
           },
         ]);
+      }),
+    ),
+  );
+
+  it.effect("does not trust an older authenticated CLI's unverified registry inventory", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { catalog: _catalog, ...oldInfo } = runtimeInfo;
+        const binaryPath = yield* writeInfoCli(oldInfo, 0);
+        const snapshot = yield* buildStatus(binaryPath);
+        expect(snapshot.auth.status).toBe("authenticated");
+        expect(snapshot.status).toBe("warning");
+        expect(snapshot.models).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("does not advertise an expired account catalog through an offline probe", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const binaryPath = yield* writeInfoCli(runtimeInfo, 0);
+        const snapshot = yield* buildStatus(binaryPath, runtimeInfo.catalog.expiresAt);
+        expect(snapshot.status).toBe("warning");
+        expect(snapshot.models).toEqual([]);
+      }),
+    ),
+  );
+
+  it.effect("refreshes through the native command once, then admits from the offline cache", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(0);
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-mc-catalog-refresh-" });
+        const log = `${directory}/commands.jsonl`;
+        const marker = `${directory}/fresh`;
+        const binaryPath = writeFakeCli({
+          directory,
+          name: "mastracode",
+          source: [
+            'import * as fs from "node:fs";',
+            `const log = ${encodeJson(log)}; const marker = ${encodeJson(marker)};`,
+            'fs.appendFileSync(log, JSON.stringify({ args: process.argv.slice(2), isolated: process.env.MASTRA_APP_DATA_DIR }) + "\\n");',
+            'if (process.argv[2] === "catalog") {',
+            '  if (process.argv.slice(2).join(" ") !== "catalog refresh --provider openai-codex --json") process.exit(2);',
+            `  fs.writeFileSync(marker, "ready"); process.stdout.write(JSON.stringify({ type: "success", provider: "openai-codex", catalog: ${encodeJson(runtimeInfo.catalog)} }));`,
+            '} else if (process.argv[2] === "info") {',
+            `  const info = ${encodeJson(runtimeInfo)};`,
+            '  if (!fs.existsSync(marker)) { info.catalog.status = "missing"; info.models = []; }',
+            "  process.stdout.write(JSON.stringify(info));",
+            "} else process.exit(2);",
+          ].join("\n"),
+        });
+        const refresh = yield* makeMastraCodeCatalogRefresh(
+          decodeSettings({ enabled: true, binaryPath }),
+          {
+            ...process.env,
+            MASTRA_APP_DATA_DIR: directory,
+          },
+        );
+        expect(yield* refresh()).toBe(true);
+        expect(yield* refresh()).toBe(true);
+        expect(yield* refresh(true)).toBe(true);
+        const calls = (yield* fs.readFileString(log))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(calls.map((call) => call.args)).toEqual([
+          ["info", "--json"],
+          ["catalog", "refresh", "--provider", "openai-codex", "--json"],
+          ["info", "--json"],
+          ["info", "--json"],
+          ["info", "--json"],
+          ["catalog", "refresh", "--provider", "openai-codex", "--json"],
+          ["info", "--json"],
+        ]);
+        expect(calls.every((call) => call.isolated === directory)).toBe(true);
+      }),
+    ),
+  );
+
+  it.effect("interrupts the owned catalog child without publishing a ready catalog", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(0);
+        const fs = yield* FileSystem.FileSystem;
+        const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-mc-catalog-cancel-" });
+        const started = directory + "/started";
+        const stopped = directory + "/stopped";
+        const binaryPath = writeFakeCli({
+          directory,
+          name: "mastracode",
+          source: [
+            'import { writeFileSync } from "node:fs";',
+            'if (process.argv[2] === "info") {',
+            "process.stdout.write(JSON.stringify(" +
+              encodeJson({
+                ...runtimeInfo,
+                catalog: { ...runtimeInfo.catalog, status: "missing" },
+                models: [],
+              }) +
+              "));",
+            '} else if (process.argv[2] === "catalog") {',
+            'process.on("SIGTERM", () => { writeFileSync(' +
+              encodeJson(stopped) +
+              ', "stopped"); process.exit(0); });',
+            "writeFileSync(" + encodeJson(started) + ', "started");',
+            "setInterval(() => {}, 1000);",
+            "} else process.exit(2);",
+          ].join("\n"),
+        });
+        const refresh = yield* makeMastraCodeCatalogRefresh(
+          decodeSettings({ enabled: true, binaryPath }),
+          { ...process.env, MASTRA_APP_DATA_DIR: directory },
+        );
+        const running = yield* refresh().pipe(Effect.forkChild);
+        while (!(yield* fs.exists(started))) {
+          yield* Effect.yieldNow;
+        }
+        yield* Fiber.interrupt(running);
+        expect(yield* fs.exists(stopped)).toBe(true);
+        const snapshot = yield* checkMastraCodeProviderStatus(
+          decodeSettings({ enabled: true, binaryPath }),
+          { ...process.env, MASTRA_APP_DATA_DIR: directory },
+        );
+        expect(snapshot.status).toBe("warning");
+        expect(snapshot.models).toEqual([]);
       }),
     ),
   );
