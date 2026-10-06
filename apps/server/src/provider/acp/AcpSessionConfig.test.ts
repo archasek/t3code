@@ -1,6 +1,44 @@
 import { describe, expect, it } from "@effect/vitest";
+import { ProviderInstanceId } from "@t3tools/contracts";
 
-import { ACP_SESSION_MODE_OPTION_ID, acpProviderOptionDescriptors } from "./AcpSessionConfig.ts";
+import {
+  ACP_SESSION_MODE_OPTION_ID,
+  acpProviderOptionDescriptors,
+  acpReportedModelSelection,
+} from "./AcpSessionConfig.ts";
+
+describe("acpReportedModelSelection", () => {
+  it("reports session-owned effort without sharing mutable defaults", () => {
+    const config = (effort: string) => [
+      {
+        id: "model",
+        name: "Model",
+        category: "model",
+        type: "select" as const,
+        currentValue: "openai/gpt-6-luna",
+        options: [{ value: "openai/gpt-6-luna", name: "Luna" }],
+      },
+      {
+        id: "thought_level",
+        name: "Reasoning",
+        category: "thought_level",
+        type: "select" as const,
+        currentValue: effort,
+        options: [
+          { value: "low", name: "Low" },
+          { value: "high", name: "High" },
+        ],
+      },
+    ];
+    const instance = ProviderInstanceId.make("mastraCode");
+    const low = acpReportedModelSelection(config("low"), instance);
+    const high = acpReportedModelSelection(config("high"), instance);
+    expect(low?.options).toEqual([{ id: "thought_level", value: "low" }]);
+    expect(high?.options).toEqual([{ id: "thought_level", value: "high" }]);
+    expect(low?.options).toEqual([{ id: "thought_level", value: "low" }]);
+    expect(acpReportedModelSelection([], instance)).toBeUndefined();
+  });
+});
 
 describe("acpProviderOptionDescriptors", () => {
   it("maps non-model select options and excludes model and collaboration categories", () => {

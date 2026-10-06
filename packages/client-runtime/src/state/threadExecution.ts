@@ -158,7 +158,13 @@ export function deriveReportedModelSelection(
 }
 
 // Option ids providers use for reasoning effort (Codex, Claude, Grok/ACP, OpenCode).
-const REASONING_EFFORT_OPTION_IDS = ["reasoningEffort", "effort", "reasoning", "variant"] as const;
+const REASONING_EFFORT_OPTION_IDS = [
+  "reasoningEffort",
+  "thought_level",
+  "effort",
+  "reasoning",
+  "variant",
+] as const;
 
 /**
  * The reasoning effort a thread's model runs at, resolved and named the way

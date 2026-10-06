@@ -1528,6 +1528,9 @@ export const layerWithOptions = (
             observeActivity(providerSessionId, touchActivity(providerSessionId)).pipe(
               Effect.andThen(runtime.respondToRuntimeRequest(input)),
             ),
+          ...(runtime.validateRuntimeRequestResponse === undefined
+            ? {}
+            : { validateRuntimeRequestResponse: runtime.validateRuntimeRequestResponse }),
         };
       };
 

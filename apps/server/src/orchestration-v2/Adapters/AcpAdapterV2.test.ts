@@ -725,77 +725,93 @@ describe("AcpAdapterV2", () => {
     );
   });
 
-  it.effect("starts the MCP bridge directly from the self-contained runtime", () =>
-    Effect.gen(function* () {
-      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const idAllocator = yield* IdAllocator.IdAllocatorV2;
-      const path = yield* Path.Path;
-      const serverConfig = yield* ServerConfig.ServerConfig;
-      const selfInvocation = yield* resolveSelfInvocation().pipe(
-        Effect.provideService(HostProcessIsExecutable, true),
-      );
-      const mockAgentPath = yield* path.fromFileUrl(
-        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
-      );
+  it.effect.each(["stdio", "http"] as const)(
+    "starts the MCP bridge directly from the self-contained runtime using %s",
+    (transport) =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const path = yield* Path.Path;
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const selfInvocation = yield* resolveSelfInvocation().pipe(
+          Effect.provideService(HostProcessIsExecutable, true),
+        );
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
 
-      const instanceId = ProviderInstanceId.make("acp-test-self-contained-mcp-bridge");
-      const threadId = ThreadId.make("thread-acp-self-contained-mcp-bridge");
-      McpProviderSession.setMcpProviderSession({
-        environmentId: EnvironmentId.make("environment-acp-self-contained-mcp-bridge"),
-        threadId,
-        providerSessionId: "mcp-session-acp-self-contained-mcp-bridge",
-        providerInstanceId: instanceId,
-        endpoint: "http://127.0.0.1:43123/mcp",
-        authorizationHeader: "Bearer self-contained-mcp-bridge-token",
-        browserToolsAvailable: false,
-      });
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => {
-          McpProviderSession.clearMcpProviderSession(threadId);
-        }),
-      );
+        const instanceId = ProviderInstanceId.make("acp-test-self-contained-mcp-bridge");
+        const threadId = ThreadId.make("thread-acp-self-contained-mcp-bridge");
+        McpProviderSession.setMcpProviderSession({
+          environmentId: EnvironmentId.make("environment-acp-self-contained-mcp-bridge"),
+          threadId,
+          providerSessionId: "mcp-session-acp-self-contained-mcp-bridge",
+          providerInstanceId: instanceId,
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer self-contained-mcp-bridge-token",
+          browserToolsAvailable: false,
+        });
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            McpProviderSession.clearMcpProviderSession(threadId);
+          }),
+        );
 
-      let runtimeInput: AcpAdapterV2RuntimeInput | undefined;
-      const makeRuntime = makeMockRuntime({ childProcessSpawner, mockAgentPath });
-      const adapter = makeAcpAdapterV2({
-        crypto: yield* Crypto.Crypto,
-        instanceId,
-        flavor: {
-          driver: ACP_TEST_DRIVER,
-          capabilities: AcpProviderCapabilitiesV2,
-          makeRuntime: (input) =>
-            Effect.sync(() => {
-              runtimeInput = input;
-            }).pipe(Effect.andThen(makeRuntime(input))),
-        },
-        fileSystem,
-        idAllocator,
-        serverConfig,
-        selfInvocation,
-      });
-      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        cwd: process.cwd(),
-      });
-      const modelSelection = { instanceId, model: "default" } as const;
-      yield* adapter.openSession({
-        threadId,
-        providerSessionId: ProviderSessionId.make("provider-session-acp-self-contained-mcp-bridge"),
-        modelSelection,
-        runtimePolicy,
-      });
+        let runtimeInput: AcpAdapterV2RuntimeInput | undefined;
+        const makeRuntime = makeMockRuntime({ childProcessSpawner, mockAgentPath });
+        const adapter = makeAcpAdapterV2({
+          crypto: yield* Crypto.Crypto,
+          instanceId,
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            mcpTransport: transport,
+            makeRuntime: (input) =>
+              Effect.sync(() => {
+                runtimeInput = input;
+              }).pipe(Effect.andThen(makeRuntime(input))),
+          },
+          fileSystem,
+          idAllocator,
+          serverConfig,
+          selfInvocation,
+        });
+        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+        yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make(
+            "provider-session-acp-self-contained-mcp-bridge",
+          ),
+          modelSelection,
+          runtimePolicy,
+        });
 
-      const mcpServer = runtimeInput?.mcpServers[0];
-      if (mcpServer === undefined || !("command" in mcpServer)) {
-        return yield* Effect.die("ACP runtime must receive the t3-code stdio MCP server");
-      }
-      assert.equal(mcpServer.command, process.execPath);
-      assert.deepEqual(mcpServer.args, ["acp-mcp-bridge"]);
-      assert.equal(runtimeInput?.processEnvironment?.T3_ACP_MCP_NODE, process.execPath);
-      assert.equal(runtimeInput?.processEnvironment?.T3_ACP_MCP_ENTRYPOINT, undefined);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+        const mcpServer = runtimeInput?.mcpServers[0];
+        if (transport === "http") {
+          assert.deepEqual(mcpServer, {
+            type: "http",
+            name: "t3-code",
+            url: "http://127.0.0.1:43123/mcp",
+            headers: [{ name: "Authorization", value: "Bearer self-contained-mcp-bridge-token" }],
+          });
+          assert.deepEqual(runtimeInput?.acpMcpServers, []);
+          assert.isUndefined(runtimeInput?.processEnvironment);
+          return;
+        }
+        if (mcpServer === undefined || !("command" in mcpServer)) {
+          return yield* Effect.die("ACP runtime must receive the t3-code stdio MCP server");
+        }
+        assert.equal(mcpServer.command, process.execPath);
+        assert.deepEqual(mcpServer.args, ["acp-mcp-bridge"]);
+        assert.equal(runtimeInput?.processEnvironment?.T3_ACP_MCP_NODE, process.execPath);
+        assert.equal(runtimeInput?.processEnvironment?.T3_ACP_MCP_ENTRYPOINT, undefined);
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
   it.live("refreshes ACP prompt instructions when the interaction mode changes", () =>
@@ -2147,6 +2163,11 @@ describe("AcpAdapterV2", () => {
           modelSelection,
           runtimePolicy,
         });
+        assert.equal(providerThread.nativeMetadata?.modelSelection?.model, "openai/gpt-6.1-sol");
+        assert.deepEqual(providerThread.nativeMetadata?.modelSelection?.options, [
+          { id: "mode", value: "build" },
+          { id: "thought_level", value: "high" },
+        ]);
         yield* first.startTurn(
           makeTurnInput({
             threadId,
@@ -2166,9 +2187,9 @@ describe("AcpAdapterV2", () => {
         const firstTerminal = Option.getOrThrow(terminal);
         assert.equal(firstTerminal.type, "turn.terminal");
         if (firstTerminal.type === "turn.terminal") assert.equal(firstTerminal.status, "completed");
-        const firstRequest = JSON.parse(
-          yield* fs.readFileString(path.join(fixture, "paths-RESUME.json")),
-        );
+        const firstRequest = yield* Schema.decodeEffect(
+          Schema.fromJsonString(Schema.Struct({ reasoningEffort: Schema.String })),
+        )(yield* fs.readFileString(path.join(fixture, "paths-RESUME.json")));
         assert.equal(firstRequest.reasoningEffort, "high");
         yield* Scope.close(firstScope, Exit.void);
         yield* fs.remove(path.join(fixture, "paths-RESUME.json"));
@@ -2211,9 +2232,9 @@ describe("AcpAdapterV2", () => {
         const lastTerminal = Option.getOrThrow(resumedTerminal);
         assert.equal(lastTerminal.type, "turn.terminal");
         if (lastTerminal.type === "turn.terminal") assert.equal(lastTerminal.status, "completed");
-        const restoredRequest = JSON.parse(
-          yield* fs.readFileString(path.join(fixture, "paths-RESUME.json")),
-        );
+        const restoredRequest = yield* Schema.decodeEffect(
+          Schema.fromJsonString(Schema.Struct({ reasoningEffort: Schema.String })),
+        )(yield* fs.readFileString(path.join(fixture, "paths-RESUME.json")));
         assert.equal(restoredRequest.reasoningEffort, "high");
         for (const [index, marker] of ["ALLOW", "REJECT", "ASK", "PLAN"].entries()) {
           const turnPolicy =
@@ -4885,7 +4906,27 @@ describe("AcpAdapterV2", () => {
               requestId: pending.payload.id,
               answers: { approved: ["owner@example.com"], secondEmail: ["second@example.com"] },
             } as const;
-            const raced = yield* Effect.all(
+            const invalidAnswer = {
+              ...answer,
+              commandId: CommandId.make("answer-mc-form-invalid"),
+              answers: {},
+            };
+            const invalid = yield* firstClient.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](
+              invalidAnswer,
+            ).pipe(Effect.result);
+            assert.equal(invalid._tag, "Failure");
+            const invalidRetry = yield* secondClient.client[
+              ORCHESTRATION_V2_WS_METHODS.dispatchCommand
+            ](invalidAnswer).pipe(Effect.result);
+            assert.equal(invalidRetry._tag, "Failure");
+            const stillPending = yield* orchestrator.getThreadProjection(threadId);
+            assert.equal(stillPending.runtimeRequests[0]?.status, "pending");
+            assert.equal(
+              stillPending.turnItems.find((item) => item.type === "user_input_request")?.status,
+              "waiting",
+            );
+            assert.isFalse(yield* Deferred.isDone(responseWritten));
+            const race = yield* Effect.all(
               [
                 firstClient.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](answer).pipe(
                   Effect.result,
@@ -4896,7 +4937,15 @@ describe("AcpAdapterV2", () => {
                 }).pipe(Effect.result),
               ],
               { concurrency: "unbounded" },
+            ).pipe(Effect.forkChild);
+            yield* Deferred.await(validationEntered);
+            assert.isFalse(yield* Deferred.isDone(responseWritten));
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).runtimeRequests[0]?.status,
+              "pending",
             );
+            yield* Deferred.succeed(releaseValidation, undefined);
+            const raced = yield* Fiber.join(race);
             assert.equal(raced.filter((result) => result._tag === "Success").length, 1);
             assert.equal(raced.filter((result) => result._tag === "Failure").length, 1);
             const loser = raced.find((result) => result._tag === "Failure");
@@ -4927,13 +4976,10 @@ describe("AcpAdapterV2", () => {
               );
             assert.equal(retry.sequence, winner.success.sequence);
             const drain = yield* worker.drain().pipe(Effect.forkChild);
-            yield* Deferred.await(validationEntered);
-            assert.isFalse(yield* Deferred.isDone(responseWritten));
             assert.equal(
               (yield* orchestrator.getThreadProjection(threadId)).runtimeRequests[0]?.status,
               "resolved",
             );
-            yield* Deferred.succeed(releaseValidation, undefined);
             yield* Deferred.await(responseWritten);
             yield* Fiber.join(drain);
             for (const queue of subscriptionQueues) {

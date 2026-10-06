@@ -39,6 +39,7 @@ const MastraCodeInfoSchema = Schema.Struct({
   schemaVersion: Schema.Literal(1),
   version: Schema.String,
   acpProtocolVersion: Schema.Literal(1),
+  thinkingLevelDescription: Schema.optional(Schema.String),
   capabilities: Schema.Struct({
     loadSession: Schema.Boolean,
     permissions: Schema.Boolean,
@@ -50,6 +51,7 @@ const MastraCodeInfoSchema = Schema.Struct({
       id: Schema.String,
       modes: Schema.optional(Schema.Array(Schema.String)),
       thinkingLevels: Schema.optional(Schema.Array(Schema.String)),
+      defaultThinkingLevel: Schema.optional(Schema.String),
     }),
   ),
   auth: Schema.Struct({
@@ -157,10 +159,17 @@ function modelsFromInfo(info: MastraCodeInfo | undefined): ReadonlyArray<ServerP
   const defaultBuildModel = models
     .find(({ id, modes }) => id.trim() && (modes === undefined || modes.includes("build")))
     ?.id.trim();
-  return models.flatMap(({ id, modes, thinkingLevels }) => {
+  return models.flatMap(({ id, modes, thinkingLevels, defaultThinkingLevel }) => {
     const slug = id.trim();
     if (!slug || slug.length > 256 || seen.has(slug)) return [];
     seen.add(slug);
+    const levels = [
+      ...new Set(
+        (thinkingLevels ?? []).filter(
+          (level) => level.length > 0 && level.length <= 256 && level === level.trim(),
+        ),
+      ),
+    ];
     return [
       {
         slug,
@@ -179,16 +188,24 @@ function modelsFromInfo(info: MastraCodeInfo | undefined): ReadonlyArray<ServerP
               ),
             }),
         capabilities: createModelCapabilities({
-          optionDescriptors: thinkingLevels?.length
+          optionDescriptors: levels.length
             ? [
                 {
                   id: "thought_level",
-                  label: "Reasoning effort",
+                  label: "Reasoning",
+                  description:
+                    info?.thinkingLevelDescription?.trim() ||
+                    "Requested MC levels; the provider may adjust or reject the selected value.",
                   type: "select",
-                  options: [...new Set(thinkingLevels)].map((level) => ({
+                  options: levels.map((level) => ({
                     id: level,
-                    label: level.charAt(0).toUpperCase() + level.slice(1),
+                    label:
+                      level === "off" ? "Default" : level.charAt(0).toUpperCase() + level.slice(1),
+                    ...(level === defaultThinkingLevel ? { isDefault: true } : {}),
                   })),
+                  ...(defaultThinkingLevel && levels.includes(defaultThinkingLevel)
+                    ? { currentValue: defaultThinkingLevel }
+                    : {}),
                 },
               ]
             : [],

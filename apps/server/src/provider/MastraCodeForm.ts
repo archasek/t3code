@@ -49,13 +49,23 @@ const propertySchema = Schema.Union([
     minItems: Schema.optional(Schema.NullOr(Schema.Number)),
     maxItems: Schema.optional(Schema.NullOr(Schema.Number)),
     items: Schema.Union([
-      Schema.Struct({ enum: Schema.Array(Schema.String) }),
-      Schema.Struct({ anyOf: Schema.Array(enumOption) }),
+      Schema.Struct({
+        type: Schema.optional(Schema.Literal("string")),
+        enum: Schema.Array(Schema.String),
+      }),
+      Schema.Struct({
+        type: Schema.optional(Schema.Literal("string")),
+        anyOf: Schema.Array(enumOption),
+      }),
     ]),
   }),
 ]);
 type FormProperty = typeof propertySchema.Type;
 const formSchema = Schema.Struct({
+  ...common,
+  type: Schema.optional(Schema.Literal("object")),
+  $schema: Schema.optional(Schema.String),
+  additionalProperties: Schema.optional(Schema.Boolean),
   properties: Schema.optional(Schema.Record(Schema.String, propertySchema)),
   required: Schema.optional(Schema.NullOr(Schema.Array(Schema.String))),
 });
@@ -150,6 +160,7 @@ function coerceMastraCodeElicitationAnswer(
 function elicitationQuestions(
   request: { readonly message: string; readonly requestedSchema: typeof formSchema.Type },
   requestId: string,
+  questionIds: ReadonlyMap<string, string>,
 ): OrchestrationV2UserInputQuestion[] {
   const properties = request.requestedSchema.properties ?? {};
   const required = new Set(request.requestedSchema.required ?? []);
@@ -201,7 +212,7 @@ function elicitationQuestions(
         exclusive: true,
       });
     return {
-      id,
+      id: questionIds.get(id)!,
       header: text(property.title) ?? (required.has(id) ? "Required" : "Optional"),
       question: [request.message, text(property.description)].filter(Boolean).join("\n\n") || id,
       options,
@@ -214,7 +225,7 @@ function elicitationQuestions(
   });
 }
 
-const decodeForm = Schema.decodeUnknownOption(formSchema);
+const decodeForm = Schema.decodeUnknownOption(formSchema, { onExcessProperty: "error" });
 
 export function prepareMastraCodeForm(
   input: Parameters<NonNullable<AcpAdapterV2Flavor["prepareFormElicitation"]>>[0],
@@ -228,14 +239,29 @@ export function prepareMastraCodeForm(
     const candidate = Option.getOrUndefined(decoded);
     const supported =
       candidate !== undefined &&
+      (candidate.required ?? []).every((key) => Object.hasOwn(candidate.properties ?? {}, key)) &&
       Object.values(candidate.properties ?? {}).every((property) =>
         ["string", "number", "integer", "boolean", "array"].includes(property.type),
       );
     const schema = supported ? candidate : undefined;
     const request = { message: input.request.message, requestedSchema: schema ?? {} };
+    const nativeKeys = Object.keys(schema?.properties ?? {});
+    const reservedIds = new Set(nativeKeys);
+    const questionIds = new Map<string, string>();
+    for (const [ordinal, key] of nativeKeys.entries()) {
+      let id = key;
+      if (key.length === 0 || key.trim() !== key) {
+        id = `mastra-field-${ordinal}`;
+        while (reservedIds.has(id)) id += ":field";
+      }
+      reservedIds.add(id);
+      questionIds.set(key, id);
+    }
+    const nativeKeyByQuestionId = new Map([...questionIds].map(([key, id]) => [id, key]));
     const questions: OrchestrationV2UserInputQuestion[] = [];
-    for (const question of elicitationQuestions(request, input.nativeRequestId)) {
-      const property = schema?.properties?.[question.id];
+    for (const question of elicitationQuestions(request, input.nativeRequestId, questionIds)) {
+      const nativeKey = nativeKeyByQuestionId.get(question.id);
+      const property = nativeKey === undefined ? undefined : schema?.properties?.[nativeKey];
       const allowEmptyAnswer =
         question.answerFormat === "raw-string" &&
         property?.type === "string" &&
@@ -246,60 +272,82 @@ export function prepareMastraCodeForm(
         ...(question.answerFormat === "raw-string" ? { allowEmptyAnswer } : {}),
       });
     }
+    const evaluate = (answers: import("@t3tools/contracts").ProviderUserInputAnswers | null) =>
+      Effect.gen(function* () {
+        if (schema === undefined || answers === null) return { action: "cancel" } as const;
+        const properties = schema.properties ?? {};
+        if (Object.keys(properties).length === 0) {
+          const submitted = answers[EMPTY_FORM_CONFIRMATION_ID];
+          const confirmation =
+            Array.isArray(submitted) && submitted.length === 1 ? submitted[0] : submitted;
+          return confirmation === "accept"
+            ? ({ action: "accept", content: {} } as const)
+            : ({ action: confirmation === "decline" ? "decline" : "cancel" } as const);
+        }
+        const content: Record<string, ElicitationValue> = {};
+        for (const [questionId, submitted] of Object.entries(answers)) {
+          const key = nativeKeyByQuestionId.get(questionId);
+          if (key === undefined || !Object.hasOwn(properties, key)) continue;
+          const property = properties[key]!;
+          if (!schema.required?.includes(key)) {
+            const skip = optionalElicitationSkipValue(property, input.nativeRequestId, key);
+            if (submitted === skip || (Array.isArray(submitted) && submitted.includes(skip))) {
+              if (Array.isArray(submitted) && submitted.length !== 1) return undefined;
+              continue;
+            }
+          }
+          const emptyArrayValue = emptyElicitationArrayValue(property, input.nativeRequestId, key);
+          const explicitEmptyArray =
+            emptyArrayValue !== undefined &&
+            (submitted === emptyArrayValue ||
+              (Array.isArray(submitted) && submitted.includes(emptyArrayValue)));
+          if (explicitEmptyArray && Array.isArray(submitted) && submitted.length !== 1)
+            return undefined;
+          const value = explicitEmptyArray
+            ? []
+            : property.type !== "array" && Array.isArray(submitted)
+              ? submitted.length === 1
+                ? submitted[0]
+                : undefined
+              : submitted;
+          const coerced = coerceMastraCodeElicitationAnswer(property, value);
+          if (coerced === undefined || !(yield* validateString(property, coerced))) {
+            return undefined;
+          }
+          Object.defineProperty(content, key, {
+            value: coerced,
+            enumerable: true,
+            configurable: true,
+            writable: true,
+          });
+        }
+        if (schema.required?.some((key) => !Object.hasOwn(content, key))) {
+          return undefined;
+        }
+        return { action: "accept", content } as const;
+      });
+    const answerKey = (answers: import("@t3tools/contracts").ProviderUserInputAnswers) =>
+      JSON.stringify(Object.entries(answers).sort(([left], [right]) => left.localeCompare(right)));
+    let validated: { key: string; response: EffectAcpSchema.CreateElicitationResponse } | undefined;
     return {
       questions,
+      validateAnswers: (answers) =>
+        evaluate(answers).pipe(
+          Effect.map((result) => {
+            validated =
+              result === undefined ? undefined : { key: answerKey(answers), response: result };
+            return result !== undefined;
+          }),
+        ),
       respond: (answers) =>
-        Effect.gen(function* () {
-          if (schema === undefined || answers === null) return { action: "cancel" } as const;
-          const properties = schema.properties ?? {};
-          if (Object.keys(properties).length === 0) {
-            const submitted = answers[EMPTY_FORM_CONFIRMATION_ID];
-            const confirmation =
-              Array.isArray(submitted) && submitted.length === 1 ? submitted[0] : submitted;
-            return confirmation === "accept"
-              ? ({ action: "accept", content: {} } as const)
-              : ({ action: confirmation === "decline" ? "decline" : "cancel" } as const);
-          }
-          const content: Record<string, ElicitationValue> = {};
-          for (const [key, submitted] of Object.entries(answers)) {
-            if (!Object.hasOwn(properties, key)) continue;
-            const property = properties[key]!;
-            if (!schema.required?.includes(key)) {
-              const skip = optionalElicitationSkipValue(property, input.nativeRequestId, key);
-              if (submitted === skip || (Array.isArray(submitted) && submitted.includes(skip))) {
-                if (Array.isArray(submitted) && submitted.length !== 1)
-                  return { action: "cancel" } as const;
-                continue;
-              }
-            }
-            const emptyArrayValue = emptyElicitationArrayValue(
-              property,
-              input.nativeRequestId,
-              key,
-            );
-            const explicitEmptyArray =
-              emptyArrayValue !== undefined &&
-              (submitted === emptyArrayValue ||
-                (Array.isArray(submitted) && submitted.includes(emptyArrayValue)));
-            if (explicitEmptyArray && Array.isArray(submitted) && submitted.length !== 1)
-              return { action: "cancel" } as const;
-            const value = explicitEmptyArray
-              ? []
-              : property.type !== "array" && Array.isArray(submitted)
-                ? submitted.length === 1
-                  ? submitted[0]
-                  : undefined
-                : submitted;
-            const coerced = coerceMastraCodeElicitationAnswer(property, value);
-            if (coerced === undefined || !(yield* validateString(property, coerced))) {
-              return { action: "cancel" } as const;
-            }
-            content[key] = coerced;
-          }
-          if (schema.required?.some((key) => !Object.hasOwn(content, key))) {
-            return { action: "cancel" } as const;
-          }
-          return { action: "accept", content } as const;
+        Effect.suspend(() => {
+          const cached = validated;
+          validated = undefined;
+          if (answers !== null && cached?.key === answerKey(answers))
+            return Effect.succeed(cached.response);
+          return evaluate(answers).pipe(
+            Effect.map((result) => result ?? { action: "cancel" as const }),
+          );
         }),
     };
   });

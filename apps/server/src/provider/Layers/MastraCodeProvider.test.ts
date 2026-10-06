@@ -20,6 +20,7 @@ const runtimeInfo = {
   schemaVersion: 1,
   version: "0.42.3-alpha.4",
   acpProtocolVersion: 1,
+  thinkingLevelDescription: "MC requested levels, not verified backend capabilities.",
   capabilities: {
     loadSession: true,
     permissions: true,
@@ -27,7 +28,12 @@ const runtimeInfo = {
     images: true,
   },
   models: [
-    { id: "openai-codex/gpt-5", modes: ["build", "plan"], thinkingLevels: ["off", "low", "high"] },
+    {
+      id: "openai-codex/gpt-5",
+      modes: ["build", "plan"],
+      thinkingLevels: ["off", "low", "high"],
+      defaultThinkingLevel: "off",
+    },
   ],
   auth: { provider: "openai-codex", status: "authenticated" },
 };
@@ -198,11 +204,44 @@ it.layer(NodeServices.layer)("checkMastraCodeProviderStatus", (it) => {
         expect(snapshot.models[0]?.capabilities?.optionDescriptors).toMatchObject([
           {
             id: "thought_level",
-            label: "Reasoning effort",
+            label: "Reasoning",
             type: "select",
-            options: [{ id: "off" }, { id: "low" }, { id: "high" }],
+            description: expect.stringContaining("not verified backend capabilities"),
+            options: [
+              { id: "off", label: "Default", isDefault: true },
+              { id: "low" },
+              { id: "high" },
+            ],
+            currentValue: "off",
           },
         ]);
+      }),
+    ),
+  );
+
+  it.effect("rejects malformed thinking levels and deduplicates native option IDs", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const binaryPath = yield* writeInfoCli(
+          {
+            ...runtimeInfo,
+            models: [
+              {
+                ...runtimeInfo.models[0],
+                thinkingLevels: ["", " ", " high ", "off", "low", "low", "high"],
+              },
+            ],
+          },
+          0,
+        );
+        const snapshot = yield* buildStatus(binaryPath);
+        const descriptor = snapshot.models[0]?.capabilities?.optionDescriptors?.[0];
+        expect(descriptor).toMatchObject({
+          id: "thought_level",
+          options: [{ id: "off" }, { id: "low" }, { id: "high" }],
+        });
+        if (descriptor?.type !== "select") throw new Error("Expected reasoning select descriptor");
+        expect(descriptor.options).toHaveLength(3);
       }),
     ),
   );

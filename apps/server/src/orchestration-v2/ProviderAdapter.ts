@@ -561,6 +561,10 @@ export interface ProviderAdapterV2SessionRuntime {
   readonly respondToRuntimeRequest: (
     input: ProviderAdapterV2RuntimeRequestResponseInput,
   ) => Effect.Effect<void, ProviderAdapterV2Error>;
+  /** Non-settling preflight before a human response is durably resolved. */
+  readonly validateRuntimeRequestResponse?: (
+    input: ProviderAdapterV2RuntimeRequestResponseInput,
+  ) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly readThreadSnapshot: (
     input: ProviderAdapterV2ReadThreadSnapshotInput,
   ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;

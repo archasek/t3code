@@ -135,10 +135,18 @@ export class OrchestratorDispatchError extends Schema.TaggedError<OrchestratorDi
 
 export class OrchestratorCommandRejectedError extends Schema.TaggedError<OrchestratorCommandRejectedError>()(
   "OrchestratorCommandRejectedError",
-  { commandId: CommandId, commandType: Schema.String, cause: Schema.optional(Schema.Defect()) },
+  {
+    commandId: CommandId,
+    commandType: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+    detail: Schema.optional(Schema.String),
+  },
 ) {
   override get message(): string {
-    return `Orchestration command ${this.commandType} (${this.commandId}) was rejected before commit.`;
+    return (
+      this.detail ??
+      `Orchestration command ${this.commandType} (${this.commandId}) was rejected before commit.`
+    );
   }
 }
 
@@ -9748,7 +9756,56 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       } satisfies OrchestratorV2DispatchResult;
     }
 
-    const plan = yield* dispatchOnce(command).pipe(
+    // Receipt replay is above this non-settling preflight. The existing thread
+    // lock serializes validation with competing submissions and cancellation;
+    // dispatchOnce remains the pure event planner.
+    const preflight = Effect.gen(function* () {
+      if (
+        command.type !== "runtime-request.respond" ||
+        command.answers == null ||
+        command.decision === "cancel" ||
+        command.decision === "decline"
+      )
+        return;
+      const context = yield* projectionStore
+        .getRuntimeResponseContext(command.threadId, command.requestId)
+        .pipe(
+          Effect.mapError(() => new OrchestratorProjectionError({ threadId: command.threadId })),
+        );
+      const request = context.request;
+      if (request?.status !== "pending" || request.responseCapability.type !== "live") return;
+      const session = yield* providerSessions
+        .get(request.responseCapability.providerSessionId)
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorCommandRejectedError({
+                commandId: command.commandId,
+                commandType: command.type,
+                detail: "This question's provider session is unavailable. Please try again.",
+                cause,
+              }),
+          ),
+        );
+      if (Option.isNone(session) || session.value.validateRuntimeRequestResponse === undefined)
+        return;
+      yield* session.value
+        .validateRuntimeRequestResponse({ requestId: command.requestId, answers: command.answers })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestratorCommandRejectedError({
+                commandId: command.commandId,
+                commandType: command.type,
+                detail:
+                  "This answer could not be validated. Check the form requirements and submit again.",
+                cause,
+              }),
+          ),
+        );
+    });
+    const plan = yield* preflight.pipe(
+      Effect.andThen(dispatchOnce(command)),
       Effect.flatMap((planned) =>
         // A settle that finds the provider already ended everything has
         // nothing to record, which is its expected outcome, not a failure.

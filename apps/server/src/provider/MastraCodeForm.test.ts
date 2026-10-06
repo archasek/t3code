@@ -35,6 +35,81 @@ function form(requestedSchema: unknown) {
 }
 
 describe("MastraCodeForm", () => {
+  it.effect(
+    "consumes the validated native result without running the constraint worker twice",
+    () =>
+      Effect.gen(function* () {
+        let validations = 0;
+        const prepared = yield* prepareMastraCodeForm(
+          {
+            request: {
+              mode: "form",
+              message: "Code",
+              requestedSchema: {
+                properties: { code: { type: "string", pattern: "^ok$", minLength: 1 } },
+                required: ["code"],
+              },
+            },
+            nativeRequestId: "cached-form",
+            threadId: ThreadId.make("thread-1"),
+          },
+          () => Effect.sync(() => ++validations === 1),
+        );
+        expect(yield* prepared.validateAnswers!({ code: ["ok"] })).toBe(true);
+        expect(yield* prepared.respond({ code: ["ok"] })).toEqual({
+          action: "accept",
+          content: { code: "ok" },
+        });
+        expect(validations).toBe(1);
+        expect(yield* prepared.respond(null)).toEqual({ action: "cancel" });
+      }),
+  );
+  it.effect("validates a correction without settling or changing native response semantics", () =>
+    Effect.gen(function* () {
+      const prepared = yield* form({
+        type: "object",
+        properties: { count: { type: "integer", minimum: 1, maximum: 3 } },
+        required: ["count"],
+      });
+      expect(yield* prepared.validateAnswers!({ count: ["4"] })).toBe(false);
+      expect(yield* prepared.validateAnswers!({})).toBe(false);
+      expect(yield* prepared.validateAnswers!({ count: ["2"] })).toBe(true);
+      expect(yield* prepared.respond({ count: ["2"] })).toEqual({
+        action: "accept",
+        content: { count: 2 },
+      });
+      expect(yield* prepared.respond(null)).toEqual({ action: "cancel" });
+    }),
+  );
+  it.effect("uses collision-safe UI IDs while preserving exact native field keys", () =>
+    Effect.gen(function* () {
+      const keys = ["", " padded ", "mastra-field-0", "mastra-field-1", "__proto__"];
+      const prepared = yield* form({
+        type: "object",
+        properties: Object.fromEntries(keys.map((key) => [key, { type: "string" }])),
+        required: keys,
+      });
+      expect(prepared.questions).toHaveLength(keys.length);
+      expect(new Set(prepared.questions.map((question) => question.id)).size).toBe(keys.length);
+      for (const question of prepared.questions) {
+        expect(question.id.length).toBeGreaterThan(0);
+        expect(question.id).toBe(question.id.trim());
+        yield* encodeOrchestrationQuestion(question).pipe(
+          Effect.flatMap(decodeOrchestrationQuestion),
+        );
+        expect(question.allowEmptyAnswer).toBe(true);
+      }
+      const answers = Object.fromEntries(
+        prepared.questions.map((question, index) => [question.id, [`value-${index}`]]),
+      );
+      expect(yield* prepared.respond(answers)).toEqual({
+        action: "accept",
+        content: Object.fromEntries(keys.map((key, index) => [key, `value-${index}`])),
+      });
+      expect(yield* prepared.respond({})).toEqual({ action: "cancel" });
+    }),
+  );
+
   it.effect("rejects excess forms before answers and releases capacity idempotently", () =>
     Effect.gen(function* () {
       const leases = yield* Effect.all(
@@ -265,6 +340,25 @@ describe("MastraCodeForm", () => {
           [id]: ["accept"],
         }),
       ).toEqual({ action: "cancel" });
+    }),
+  );
+
+  it.effect.each([
+    { properties: {}, required: ["token"] },
+    { properties: { value: { type: "string", const: "fixed" } } },
+    { properties: { value: { type: "number", multipleOf: 2 } } },
+    { properties: { value: { type: "number", exclusiveMinimum: 0 } } },
+    { properties: { value: { type: "number", exclusiveMaximum: 4 } } },
+    { properties: { value: { type: "array", items: { enum: ["x"] }, uniqueItems: true } } },
+    { properties: { value: { type: "string", oneOf: [{ const: "x", pattern: "^x$" }] } } },
+    { properties: {}, allOf: [{ required: ["token"] }] },
+  ])("does not accept a schema whose requirements are unsupported: %j", (schema) =>
+    Effect.gen(function* () {
+      const prepared = yield* form(schema);
+      const id = prepared.questions[0]!.id;
+      expect(yield* prepared.respond({ [id]: ["accept"], value: "3" })).toEqual({
+        action: "cancel",
+      });
     }),
   );
 });

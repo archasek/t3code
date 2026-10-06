@@ -20,6 +20,10 @@ import {
   type ThreadUserInputQuestion,
 } from "@t3tools/client-runtime/state/thread-requests";
 import { Atom } from "effect/unstable/reactivity";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 
 import { threadEnvironment } from "../state/threads";
 import { scopedRequestKey } from "../lib/scopedEntities";
@@ -305,6 +309,13 @@ export function useSelectedThreadRequests() {
       },
     });
     userInputResponsesInFlight.current.delete(responseKey);
+    if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      Alert.alert(
+        "Answer not submitted",
+        error instanceof Error ? error.message : "Check the form requirements and submit again.",
+      );
+    }
     setRespondingUserInputId((current) =>
       current === activePendingUserInput.requestId ? null : current,
     );

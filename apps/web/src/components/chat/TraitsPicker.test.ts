@@ -1,10 +1,63 @@
 import { describe, expect, it } from "vite-plus/test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import {
   ProviderInstanceId,
   ProviderDriverKind,
   type ProviderOptionDescriptor,
 } from "@t3tools/contracts";
-import { buildTraitsTriggerDisplay, buildUnavailableModelOptionDescriptors } from "./TraitsPicker";
+import {
+  buildTraitsTriggerDisplay,
+  buildUnavailableModelOptionDescriptors,
+  TraitsMenuContent,
+} from "./TraitsPicker";
+import { Menu } from "../ui/menu";
+
+it("renders native reasoning semantics beside the requested levels", () => {
+  const description =
+    "MC requested levels, not verified backend capabilities. GPT-5 maps Default to Low.";
+  const markup = renderToStaticMarkup(
+    createElement(
+      Menu,
+      { open: true },
+      createElement(TraitsMenuContent, {
+        provider: ProviderDriverKind.make("mastraCode"),
+        instanceId: ProviderInstanceId.make("mastra-test"),
+        models: [
+          {
+            slug: "openai/gpt-5",
+            name: "GPT-5",
+            isCustom: false,
+            capabilities: {
+              optionDescriptors: [
+                {
+                  id: "variant",
+                  label: "Reasoning",
+                  description,
+                  type: "select",
+                  options: [
+                    { id: "off", label: "Default" },
+                    { id: "low", label: "Low" },
+                  ],
+                  currentValue: "off",
+                },
+              ],
+            },
+          },
+        ],
+        model: "openai/gpt-5",
+        modelOptions: [{ id: "variant", value: "off" }],
+        prompt: "",
+        onPromptChange: () => {},
+        onModelOptionsChange: () => {},
+        planModeEnabled: false,
+      }),
+    ),
+  );
+  expect(markup).toContain(description);
+  expect(markup).toContain("Default");
+  expect(markup).toContain("Low");
+});
 
 function selectDescriptor(
   id: string,

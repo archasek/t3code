@@ -62,6 +62,8 @@ export function makeMastraCodeAdapterV2(options: MastraCodeAdapterV2Options) {
   const flavor: AcpAdapterV2Flavor = {
     acquireFormElicitation: acquireMastraCodeFormAdmission,
     requireNativeSessionRestore: true,
+    reportsSessionConfigModelSelection: true,
+    mcpTransport: "http",
     driver: MASTRA_CODE_PROVIDER,
     capabilities: {
       ...AcpProviderCapabilitiesV2,
