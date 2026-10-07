@@ -215,6 +215,23 @@ export function buildModelOptions(
         ),
       });
     }
+    if (provider.driver === "mastraCode") {
+      const native = [...options.values()].find(
+        (option) => option.providerKey === provider.instanceId && !option.isUnavailable,
+      );
+      if (native) {
+        // Capability metadata does not select the catalog row's model. The
+        // native session still chooses and validates its own default model.
+        options.set(`${provider.instanceId}:default`, {
+          ...native,
+          key: `${provider.instanceId}:default`,
+          label: "Native default",
+          subtitle: "Use the model selected by Mastra Code.",
+          isDefault: true,
+          selection: { instanceId: provider.instanceId, model: "default" },
+        });
+      }
+    }
   }
 
   if (
@@ -239,6 +256,11 @@ export function buildModelOptions(
       const model = provider?.models.find(
         (candidate) => candidate.slug === fallbackModelSelection.model,
       );
+      const nativeDefault =
+        provider?.driver === "mastraCode" &&
+        ["default", "auto", ""].includes(fallbackModelSelection.model)
+          ? options.get(`${provider.instanceId}:default`)
+          : undefined;
       const providerDriver =
         provider?.driver ?? instanceConfig?.driver ?? fallbackModelSelection.instanceId;
       const providerLabel = providerDisplayLabel({
@@ -261,7 +283,7 @@ export function buildModelOptions(
           !["default", "auto", ""].includes(fallbackModelSelection.model))
           ? { isUnavailable: true }
           : {}),
-        capabilities: model?.capabilities ?? null,
+        capabilities: model?.capabilities ?? nativeDefault?.capabilities ?? null,
         selection: fallbackModelSelection,
       });
     }

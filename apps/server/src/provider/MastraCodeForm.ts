@@ -18,11 +18,13 @@ const enumOption = Schema.Struct({ const: Schema.String, title: Schema.optional(
 const common = {
   title: Schema.optional(Schema.NullOr(Schema.String)),
   description: Schema.optional(Schema.NullOr(Schema.String)),
+  _meta: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 };
 const propertySchema = Schema.Union([
   Schema.Struct({
     ...common,
     type: Schema.Literal("string"),
+    default: Schema.optional(Schema.NullOr(Schema.String)),
     enum: Schema.optional(Schema.NullOr(Schema.Array(Schema.String))),
     oneOf: Schema.optional(Schema.NullOr(Schema.Array(enumOption))),
     minLength: Schema.optional(Schema.NullOr(Schema.Number)),
@@ -33,19 +35,26 @@ const propertySchema = Schema.Union([
   Schema.Struct({
     ...common,
     type: Schema.Literal("number"),
+    default: Schema.optional(Schema.NullOr(Schema.Number)),
     minimum: Schema.optional(Schema.NullOr(Schema.Number)),
     maximum: Schema.optional(Schema.NullOr(Schema.Number)),
   }),
   Schema.Struct({
     ...common,
     type: Schema.Literal("integer"),
+    default: Schema.optional(Schema.NullOr(Schema.Number)),
     minimum: Schema.optional(Schema.NullOr(Schema.Number)),
     maximum: Schema.optional(Schema.NullOr(Schema.Number)),
   }),
-  Schema.Struct({ ...common, type: Schema.Literal("boolean") }),
+  Schema.Struct({
+    ...common,
+    type: Schema.Literal("boolean"),
+    default: Schema.optional(Schema.NullOr(Schema.Boolean)),
+  }),
   Schema.Struct({
     ...common,
     type: Schema.Literal("array"),
+    default: Schema.optional(Schema.NullOr(Schema.Array(Schema.String))),
     minItems: Schema.optional(Schema.NullOr(Schema.Number)),
     maxItems: Schema.optional(Schema.NullOr(Schema.Number)),
     items: Schema.Union([
@@ -169,7 +178,7 @@ function elicitationQuestions(
       {
         id: EMPTY_FORM_CONFIRMATION_ID,
         header: "Confirmation",
-        question: request.message || "Continue with this request?",
+        question: text(request.message) ?? "Continue with this request?",
         options: [
           {
             label: "Continue",
@@ -214,7 +223,9 @@ function elicitationQuestions(
     return {
       id: questionIds.get(id)!,
       header: text(property.title) ?? (required.has(id) ? "Required" : "Optional"),
-      question: [request.message, text(property.description)].filter(Boolean).join("\n\n") || id,
+      question:
+        [text(request.message), text(property.description)].filter(Boolean).join("\n\n") ||
+        questionIds.get(id)!,
       options,
       allowCustomAnswer: !enumOptions?.length,
       ...(property.type === "string" && !enumOptions?.length

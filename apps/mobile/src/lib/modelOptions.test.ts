@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { ProviderInstanceId, type ModelSelection, type ServerConfig } from "@t3tools/contracts";
+import { resolveProviderOptionDescriptors } from "./providerOptions";
 
 import {
   buildModelOptions,
@@ -505,6 +506,53 @@ describe("mobile model options", () => {
   });
 });
 
+it.each(["default", "auto", ""])("keeps reasoning for MC native sentinel %j", (model) => {
+  const instanceId = ProviderInstanceId.make("mastraCode");
+  const capabilities = {
+    optionDescriptors: [
+      {
+        id: "thought_level",
+        label: "Reasoning",
+        type: "select",
+        options: [
+          { id: "low", label: "Low" },
+          { id: "high", label: "High" },
+        ],
+      },
+    ],
+  };
+  const config = {
+    providers: [
+      {
+        instanceId,
+        driver: "mastraCode",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated" },
+        models: [{ slug: "openai/gpt-6.1-sol", name: "Sol", capabilities }],
+      },
+    ],
+  } as unknown as ServerConfig;
+  const selection = { instanceId, model };
+  const rows = buildModelOptions(config, selection);
+  const row = rows.find((option) => option.selection.model === model)!;
+  expect(row.capabilities).toEqual(capabilities);
+  expect(
+    resolveProviderOptionDescriptors({ capabilities: row.capabilities, selections: [] }),
+  ).not.toEqual([]);
+  const freshRows = buildModelOptions(config, null);
+  const fresh = resolveNewTaskModelSelection({
+    draftSelection: null,
+    projectDefaultSelection: null,
+    stickySelection: null,
+    modelOptions: freshRows,
+  });
+  expect(fresh).toEqual({ instanceId, model: "default" });
+  expect(freshRows.find((option) => option.selection.model === fresh!.model)?.capabilities).toEqual(
+    capabilities,
+  );
+});
+
 it.each(["default", "auto", "", "openai/removed-model", "openai/gpt-6-luna"])(
   "keeps MC %j through new-task resolution and send admission",
   (model) => {
@@ -605,12 +653,12 @@ it("mobile preserves MC selections across modes while custom rows remain unavail
     buildModelOptions(config, { instanceId, model: "custom" }, undefined, "plan")
       .filter((model) => !model.isUnavailable)
       .map((model) => model.selection.model),
-  ).toEqual(["build", "plan", "both", "absent"]);
+  ).toEqual(["build", "plan", "both", "absent", "default"]);
   expect(
     buildModelOptions(config, { instanceId, model: "stale" }, undefined, "default")
       .filter((model) => !model.isUnavailable)
       .map((model) => model.selection.model),
-  ).toEqual(["build", "plan", "both", "absent"]);
+  ).toEqual(["build", "plan", "both", "absent", "default"]);
   const buildRow = buildModelOptions(config, null, undefined, "plan").find(
     (model) => model.selection.model === "build",
   );

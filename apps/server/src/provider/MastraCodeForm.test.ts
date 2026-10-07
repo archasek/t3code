@@ -35,6 +35,70 @@ function form(requestedSchema: unknown) {
 }
 
 describe("MastraCodeForm", () => {
+  it.effect("normalizes native prompts and uses safe IDs for blank property prompts", () =>
+    Effect.gen(function* () {
+      for (const message of ["  Native prompt \n", " \n ", ""] as const) {
+        const prepared = yield* prepareMastraCodeForm(
+          {
+            request: {
+              mode: "form",
+              message,
+              requestedSchema: { properties: { "   ": { type: "string" } } },
+            },
+            nativeRequestId: "prompt-normalization",
+            threadId: ThreadId.make("thread-1"),
+          },
+          () => Effect.succeed(true),
+        );
+        const question = prepared.questions[0]!;
+        expect(question.question).toBe(message.trim() || question.id);
+        yield* encodeRuntimeQuestion(question);
+        yield* encodeOrchestrationQuestion(question);
+      }
+      const confirmation = yield* prepareMastraCodeForm(
+        {
+          request: { mode: "form", message: " \n ", requestedSchema: { properties: {} } },
+          nativeRequestId: "blank-confirmation",
+          threadId: ThreadId.make("thread-1"),
+        },
+        () => Effect.succeed(true),
+      );
+      expect(confirmation.questions[0]!.question).toBe("Continue with this request?");
+      yield* encodeOrchestrationQuestion(confirmation.questions[0]!);
+    }),
+  );
+
+  it.effect("accepts protocol metadata and defaults without submitting default answers", () =>
+    Effect.gen(function* () {
+      const prepared = yield* form({
+        type: "object",
+        _meta: { source: "native" },
+        properties: {
+          name: { type: "string", default: "suggested", _meta: { hint: true } },
+          count: { type: "integer", default: 2 },
+          rate: { type: "number", default: 1.5 },
+          enabled: { type: "boolean", default: true },
+          tags: { type: "array", default: ["a"], items: { type: "string", enum: ["a", "b"] } },
+        },
+        required: ["name", "count", "rate", "enabled", "tags"],
+      });
+      expect(prepared.questions).toHaveLength(5);
+      expect(yield* prepared.validateAnswers!({})).toBe(false);
+      expect(
+        yield* prepared.respond({
+          name: ["chosen"],
+          count: ["3"],
+          rate: ["2.5"],
+          enabled: ["false"],
+          tags: ["b"],
+        }),
+      ).toEqual({
+        action: "accept",
+        content: { name: "chosen", count: 3, rate: 2.5, enabled: false, tags: ["b"] },
+      });
+    }),
+  );
+
   it.effect(
     "consumes the validated native result without running the constraint worker twice",
     () =>
