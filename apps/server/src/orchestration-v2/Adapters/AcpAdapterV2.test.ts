@@ -2092,38 +2092,34 @@ describe("AcpAdapterV2", () => {
         );
         yield* fs.chmod(path.join(appDataDirectory, "auth.json"), 0o600);
         const catalogFetchedAt = yield* Clock.currentTimeMillis;
-        yield* fs.writeFileString(
-          path.join(appDataDirectory, "openai-codex-model-catalog.json"),
-          encodeFixtureJson({
-            schemaVersion: 1,
-            provider: "openai-codex",
-            scope: {
-              kind: "registered",
-              accountInstanceId: "openai-codex:integration-fixture",
-              accountId: "test-only-account",
-            },
-            endpoint: "https://chatgpt.com/backend-api/codex/models",
-            clientVersion: "0.160.0",
-            fetchedAt: catalogFetchedAt,
-            expiresAt: catalogFetchedAt + 60 * 60 * 1000,
-            slugs: ["gpt-6.1-sol", "gpt-6-luna"],
-          }),
-        );
+        const catalogPath = path.join(appDataDirectory, "openai-codex-model-catalog.json");
+        const catalogFixture = {
+          schemaVersion: 1,
+          provider: "openai-codex",
+          scope: {
+            kind: "registered",
+            accountInstanceId: "openai-codex:integration-fixture",
+            accountId: "test-only-account",
+          },
+          endpoint: "https://chatgpt.com/backend-api/codex/models",
+          clientVersion: "0.160.0",
+          fetchedAt: catalogFetchedAt,
+          expiresAt: catalogFetchedAt + 60 * 60 * 1000,
+          slugs: ["gpt-6.1-sol", "gpt-5.6-sol", "gpt-6-luna"],
+        };
+        yield* fs.writeFileString(catalogPath, encodeFixtureJson(catalogFixture));
         yield* fs.chmod(path.join(appDataDirectory, "openai-codex-model-catalog.json"), 0o600);
-        yield* fs.writeFileString(
-          path.join(appDataDirectory, "settings.json"),
-          encodeFixtureJson({
-            onboarding: { quietModePreferenceSelected: true },
-            models: {
-              modeDefaults: {
-                build: "openai/gpt-6.1-sol",
-                plan: "openai/gpt-6.1-sol",
-                fast: "openai/gpt-6-luna",
-              },
+        const configuredSettings = {
+          onboarding: { quietModePreferenceSelected: true },
+          models: {
+            modeDefaults: {
+              build: "openai/gpt-6.1-sol",
+              plan: "openai/gpt-6.1-sol",
+              fast: "openai/gpt-6-luna",
             },
-            observability: { resources: {}, localTracing: true },
-          }),
-        );
+          },
+          observability: { resources: {}, localTracing: true },
+        };
         const wrapper = path.join(root, "wrapper.mjs");
         yield* fs.writeFileString(wrapper, createFetchWrapper(cliPath));
         const launcher = path.join(root, "mastracode");
@@ -2180,6 +2176,40 @@ describe("AcpAdapterV2", () => {
           interactionMode: "default",
           cwd: workspace,
         });
+        assert.equal(yield* fs.exists(path.join(appDataDirectory, "settings.json")), false);
+        const defaultSelection = { instanceId, model: "default" } as const;
+        const admitFreshThread = (suffix: string) =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const freshThreadId = ThreadId.make(`mc-native-blank-${suffix}`);
+              const session = yield* adapter.openSession({
+                threadId: freshThreadId,
+                providerSessionId: ProviderSessionId.make(`mc-native-blank-${suffix}`),
+                modelSelection: defaultSelection,
+                runtimePolicy,
+              });
+              return yield* session.ensureThread({
+                threadId: freshThreadId,
+                modelSelection: defaultSelection,
+                runtimePolicy,
+              });
+            }),
+          );
+        const freshThread = yield* admitFreshThread("default");
+        assert.equal(freshThread.nativeMetadata?.modelSelection?.model, "openai/gpt-5.6-sol");
+        yield* fs.writeFileString(
+          catalogPath,
+          encodeFixtureJson({ ...catalogFixture, slugs: ["gpt-6.1-sol", "gpt-6-luna"] }),
+        );
+        const missingDefault = yield* Effect.exit(admitFreshThread("missing-default"));
+        if (Exit.isSuccess(missingDefault))
+          assert.fail("An absent native default must reject admission");
+        assert.include(Cause.pretty(missingDefault.cause), "unavailable for this account");
+        yield* fs.writeFileString(catalogPath, encodeFixtureJson(catalogFixture));
+        yield* fs.writeFileString(
+          path.join(appDataDirectory, "settings.json"),
+          encodeFixtureJson(configuredSettings),
+        );
         const modelSelection = {
           instanceId,
           model: "openai/gpt-6.1-sol",
