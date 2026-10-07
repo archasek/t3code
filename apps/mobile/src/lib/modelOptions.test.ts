@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { ProviderInstanceId, type ModelSelection, type ServerConfig } from "@t3tools/contracts";
+import { resolveProviderOptionDescriptors } from "./providerOptions";
 
 import {
   buildModelOptions,
@@ -503,4 +504,173 @@ describe("mobile model options", () => {
       }),
     ).toBeNull();
   });
+});
+
+it.each(["default", "auto", ""])("keeps reasoning for MC native sentinel %j", (model) => {
+  const instanceId = ProviderInstanceId.make("mastraCode");
+  const capabilities = {
+    optionDescriptors: [
+      {
+        id: "thought_level",
+        label: "Reasoning",
+        type: "select",
+        options: [
+          { id: "low", label: "Low" },
+          { id: "high", label: "High" },
+        ],
+      },
+    ],
+  };
+  const config = {
+    providers: [
+      {
+        instanceId,
+        driver: "mastraCode",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated" },
+        models: [{ slug: "openai/gpt-6.1-sol", name: "Sol", capabilities }],
+      },
+    ],
+  } as unknown as ServerConfig;
+  const selection = { instanceId, model };
+  const rows = buildModelOptions(config, selection);
+  const row = rows.find((option) => option.selection.model === model)!;
+  expect(row.capabilities).toEqual(capabilities);
+  expect(
+    resolveProviderOptionDescriptors({ capabilities: row.capabilities, selections: [] }),
+  ).not.toEqual([]);
+  const freshRows = buildModelOptions(config, null);
+  const fresh = resolveNewTaskModelSelection({
+    draftSelection: null,
+    projectDefaultSelection: null,
+    stickySelection: null,
+    modelOptions: freshRows,
+  });
+  expect(fresh).toEqual({ instanceId, model: "default" });
+  expect(freshRows.find((option) => option.selection.model === fresh!.model)?.capabilities).toEqual(
+    capabilities,
+  );
+});
+
+it.each(["default", "auto", "", "openai/removed-model", "openai/gpt-6-luna"])(
+  "keeps MC %j through new-task resolution and send admission",
+  (model) => {
+    const instanceId = ProviderInstanceId.make("mastraCode");
+    const config = {
+      providers: [
+        {
+          instanceId,
+          driver: "mastraCode",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: ["openai/gpt-6.1-sol", "openai/gpt-5.6-sol", "openai/gpt-6-luna"].map((slug) => ({
+            slug,
+            name: slug,
+            isCustom: false,
+            capabilities: null,
+          })),
+        },
+      ],
+    } as unknown as ServerConfig;
+    const selection = { instanceId, model };
+    const options = buildModelOptions(config, selection, instanceId);
+    for (const source of ["draft", "project", "sticky"] as const) {
+      const resolved = resolveNewTaskModelSelection({
+        draftSelection: source === "draft" ? selection : null,
+        projectDefaultSelection: source === "project" ? selection : null,
+        stickySelection: source === "sticky" ? selection : null,
+        modelOptions: options,
+      });
+      for (const mode of ["default", "plan"] as const) {
+        expect(resolveSelectableModelSelection(config, resolved, mode)).toEqual(selection);
+      }
+    }
+    expect(
+      resolveNewTaskModelSelection({
+        draftSelection: null,
+        projectDefaultSelection: null,
+        stickySelection: null,
+        modelOptions: buildModelOptions(config, null, instanceId),
+      }),
+    ).toEqual({ instanceId, model: "default" });
+    if (model === "openai/removed-model")
+      expect(options.find((option) => option.selection.model === model)?.isUnavailable).toBe(true);
+  },
+);
+
+it("mobile preserves MC selections across modes while custom rows remain unavailable", () => {
+  const instanceId = ProviderInstanceId.make("mastraCode");
+  const config = {
+    providers: [
+      {
+        instanceId,
+        driver: "mastraCode",
+        enabled: true,
+        installed: true,
+        auth: { status: "authenticated" },
+        models: [
+          {
+            slug: "build",
+            name: "Build",
+            isCustom: false,
+            isDefault: true,
+            capabilities: null,
+            supportedInteractionModes: ["default"],
+          },
+          {
+            slug: "plan",
+            name: "Plan",
+            isCustom: false,
+            capabilities: null,
+            supportedInteractionModes: ["plan"],
+          },
+          {
+            slug: "both",
+            name: "Both",
+            isCustom: false,
+            capabilities: null,
+            supportedInteractionModes: ["default", "plan"],
+          },
+          { slug: "absent", name: "Absent metadata", isCustom: false, capabilities: null },
+          { slug: "custom", name: "Custom", isCustom: true, capabilities: null },
+        ],
+      },
+    ],
+  } as unknown as ServerConfig;
+  expect(
+    resolveSelectableModelSelection(
+      config,
+      { instanceId, model: "build", options: [{ id: "old", value: "old" }] },
+      "plan",
+    ),
+  ).toEqual({ instanceId, model: "build", options: [{ id: "old", value: "old" }] });
+  expect(resolveSelectableModelSelection(config, { instanceId, model: "plan" }, "default")).toEqual(
+    { instanceId, model: "plan" },
+  );
+  expect(
+    buildModelOptions(config, { instanceId, model: "custom" }, undefined, "plan")
+      .filter((model) => !model.isUnavailable)
+      .map((model) => model.selection.model),
+  ).toEqual(["build", "plan", "both", "absent", "default"]);
+  expect(
+    buildModelOptions(config, { instanceId, model: "stale" }, undefined, "default")
+      .filter((model) => !model.isUnavailable)
+      .map((model) => model.selection.model),
+  ).toEqual(["build", "plan", "both", "absent", "default"]);
+  const buildRow = buildModelOptions(config, null, undefined, "plan").find(
+    (model) => model.selection.model === "build",
+  );
+  expect(buildRow?.isUnavailable).not.toBe(true);
+  const planOnly = {
+    ...config,
+    providers: config.providers.map((provider) => ({
+      ...provider,
+      models: provider.models.filter((model) => model.slug === "plan"),
+    })),
+  };
+  expect(
+    resolveSelectableModelSelection(planOnly, { instanceId, model: "plan" }, "default"),
+  ).toEqual({ instanceId, model: "plan" });
 });

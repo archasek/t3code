@@ -20,6 +20,7 @@ import {
   normalizeCustomModelSlug,
   normalizeModelSlug,
   modelSelectionsEqual,
+  resolveMastraCodeModelSelection,
 } from "./model.ts";
 
 it("keeps the Codex catalog display formatting", () => {
@@ -362,4 +363,12 @@ describe("provider-reported option display", () => {
   ])("ignores reports after changing the model, instance, or option: %j", (selected) => {
     expect(getProviderOptionCurrentLabel(descriptor, selected, reported)).toBe("Unknown");
   });
+});
+
+it("preserves MC native-default sentinels and explicit IDs without catalog substitution", () => {
+  for (const selection of ["default", "auto", "", "openai/gpt-6-luna", "removed-model"]) {
+    expect(resolveMastraCodeModelSelection(selection)).toBe(selection);
+  }
+  expect(resolveMastraCodeModelSelection(null)).toBe("default");
+  expect(resolveMastraCodeModelSelection(undefined)).toBe("default");
 });

@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
 
+import type { ProjectId } from "./baseSchemas.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   ClaudeSettings,
+  MastraCodeSettings,
   DEFAULT_SERVER_SETTINGS,
   resolveProviderInstanceEnabled,
   ServerSettings,
@@ -19,6 +21,38 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+
+describe("Mastra Code executable settings", () => {
+  const decode = Schema.decodeUnknownSync(MastraCodeSettings);
+  it("round-trips opt-in server settings and accepts provider patches", () => {
+    expect(decodeServerSettings({}).providers.mastraCode.enabled).toBe(false);
+    const patch = {
+      providers: { mastraCode: { enabled: true, binaryPath: "/opt/mastra/mastracode" } },
+    };
+    expect(decodeServerSettingsPatch(patch)).toEqual(patch);
+    expect(encodeServerSettings(decodeServerSettings(patch))).toMatchObject(patch);
+  });
+  it("is opt-in and defaults to the native CLI", () => {
+    expect(decode({})).toMatchObject({ enabled: false, binaryPath: "mastracode" });
+  });
+  it.each([
+    "mastracode",
+    "/opt/mastra/bin/mastracode",
+    "C:\\Mastra\\mastracode.exe",
+    "\\\\server\\share\\mastracode.exe",
+  ])("accepts %s", (binaryPath) => {
+    expect(decode({ binaryPath }).binaryPath).toBe(binaryPath);
+  });
+  it.each([
+    "./mastracode",
+    "..\\mastracode.exe",
+    "C:mastracode.exe",
+    "\\\\workspace",
+    "\\\\.\\pipe\\mastracode.exe",
+  ])("rejects workspace-relative or device path %s", (binaryPath) => {
+    expect(() => decode({ binaryPath })).toThrow();
+  });
+});
 
 describe("ServerSettings response streaming", () => {
   it("defaults to paragraph buffering", () => {
@@ -986,6 +1020,13 @@ describe("ServerSettingsPatch.providerInstances", () => {
 });
 
 describe("ServerSettingsPatch string normalization", () => {
+  it("lowercases GitHub hosts and defaults them to enabled", () => {
+    const patch = decodeServerSettingsPatch({
+      github: { hosts: { " GitHub.com ": { account: "  work  " } } },
+    });
+    expect(patch.github?.hosts).toEqual({ "github.com": { account: "work", enabled: true } });
+  });
+
   it("trims string settings while decoding patches", () => {
     const patch = decodeServerSettingsPatch({
       addProjectBaseDirectory: "  ~/Development  ",
@@ -1084,10 +1125,10 @@ it("validates remote device hosts and rejects ambiguous host ids", () => {
 });
 
 describe("branch naming settings", () => {
-  it("defaults existing settings to the t3code static prefix", () => {
+  it("defaults existing settings to the t3 static prefix", () => {
     expect(decodeServerSettings({})).toMatchObject({
       branchNamingMode: "static",
-      branchNamePrefix: "t3code",
+      branchNamePrefix: "t3",
       branchNameInstructions: "",
     });
   });
@@ -1104,4 +1145,45 @@ describe("branch naming settings", () => {
       expect(decodeServerSettingsPatch(input)).toEqual(input);
     },
   );
+});
+
+it("keeps pre-upgrade configured MC instances enabled without overriding either disable flag", () => {
+  const id = ProviderInstanceId.make("mastra-existing");
+  for (const flags of [
+    {},
+    { enabled: false },
+    { config: { enabled: false } },
+    { enabled: true, config: { enabled: false } },
+    { enabled: false, config: { enabled: true } },
+  ]) {
+    const settings = decodeServerSettings({
+      providerInstances: { [id]: { driver: "mastraCode", config: {}, ...flags } },
+    });
+    const instance = settings.providerInstances[id]!;
+    expect(resolveProviderInstanceEnabled(instance)).toBe(
+      !("enabled" in flags) && !("config" in flags),
+    );
+    const roundTrip = decodeServerSettings(encodeServerSettings(settings));
+    expect(resolveProviderInstanceEnabled(roundTrip.providerInstances[id]!)).toBe(
+      resolveProviderInstanceEnabled(instance),
+    );
+  }
+  const fresh = decodeServerSettings({});
+  expect(fresh.providers.mastraCode.enabled).toBe(false);
+  expect(fresh.providerInstances).toEqual({});
+  expect(fresh.providers.codex.enabled).toBe(DEFAULT_SERVER_SETTINGS.providers.codex.enabled);
+});
+
+describe("ServerSettings.removeAgentCreditsOnMerge", () => {
+  it("keeps agent credits by default and accepts opt-in patches", () => {
+    expect(decodeServerSettings({}).removeAgentCreditsOnMerge).toBe(false);
+    expect(
+      decodeServerSettingsPatch({ removeAgentCreditsOnMerge: true }).removeAgentCreditsOnMerge,
+    ).toBe(true);
+    expect(
+      decodeServerSettings({
+        projectSettingsOverrides: { project: { removeAgentCreditsOnMerge: true } },
+      }).projectSettingsOverrides["project" as ProjectId]?.removeAgentCreditsOnMerge,
+    ).toBe(true);
+  });
 });

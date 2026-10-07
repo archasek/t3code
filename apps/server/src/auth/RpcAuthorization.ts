@@ -16,7 +16,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import type * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import type * as RpcGroup from "effect/rpc/RpcGroup";
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
 
@@ -95,6 +95,11 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.scheduledTasksSetEnabled]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksDelete]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksRunNow]: AuthOrchestrationOperateScope,
+  [WS_METHODS.scheduledTasksRotateWebhookToken]: AuthOrchestrationOperateScope,
+  [WS_METHODS.secretsAnswerRequest]: AuthOrchestrationOperateScope,
+  // Delivery logs hold request bodies, so they need the same scope as the URL.
+  [WS_METHODS.scheduledTasksListWebhookDeliveries]: AuthOrchestrationOperateScope,
+  [WS_METHODS.scheduledTasksGetWebhookDelivery]: AuthOrchestrationOperateScope,
   [WS_METHODS.cloudGetRelayClientStatus]: AuthRelayReadScope,
   [WS_METHODS.cloudInstallRelayClient]: AuthRelayWriteScope,
   [WS_METHODS.pullRequestsList]: AuthOrchestrationReadScope,
@@ -182,13 +187,12 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.previewOpen]: AuthOrchestrationOperateScope,
   [WS_METHODS.previewNavigate]: AuthOrchestrationOperateScope,
   [WS_METHODS.previewResize]: AuthOrchestrationOperateScope,
+  [WS_METHODS.previewAdjust]: AuthOrchestrationOperateScope,
   [WS_METHODS.previewRefresh]: AuthOrchestrationOperateScope,
   [WS_METHODS.previewClose]: AuthOrchestrationOperateScope,
   [WS_METHODS.previewList]: AuthOrchestrationReadScope,
+  [WS_METHODS.previewClearProfile]: AuthOrchestrationOperateScope,
   [WS_METHODS.previewReportStatus]: AuthOrchestrationOperateScope,
-  [WS_METHODS.previewAutomationConnect]: AuthOrchestrationOperateScope,
-  [WS_METHODS.previewAutomationRespond]: AuthOrchestrationOperateScope,
-  [WS_METHODS.previewAutomationFocusHost]: AuthOrchestrationOperateScope,
   [WS_METHODS.subscribePreviewEvents]: AuthOrchestrationReadScope,
   [WS_METHODS.subscribeDiscoveredLocalServers]: AuthOrchestrationReadScope,
   [WS_METHODS.deviceConfigure]: AuthOrchestrationOperateScope,
@@ -224,12 +228,14 @@ export const rpcAuthorizationError = (requiredScope: AuthEnvironmentScope) =>
   });
 
 /** Authorizes every RPC on one connection against that connection's session scopes. */
-export const rpcScopeAuthorizationLayer = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
+export const layer = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
   Layer.succeed(RpcScopeAuthorization)((effect, { rpc }) => {
     const requiredScope = requiredScopeForRpcMethod(rpc._tag);
-    return scopes.includes(requiredScope)
-      ? effect
-      : Effect.fail(rpcAuthorizationError(requiredScope));
+    // deviceList chooses read or operate in its handler after decoding the input.
+    const admitted =
+      scopes.includes(requiredScope) ||
+      (rpc._tag === WS_METHODS.deviceList && scopes.includes(AuthOrchestrationOperateScope));
+    return admitted ? effect : Effect.fail(rpcAuthorizationError(requiredScope));
   });
 
 /** Retrying can install or restart tools even though ordinary listing is readable. */
@@ -237,3 +243,15 @@ export const requiredScopeForDeviceList = (input: DeviceListInput): AuthEnvironm
   input.retryHostId || input.updateTool
     ? AuthOrchestrationOperateScope
     : AuthOrchestrationReadScope;
+
+/** Every deviceList branch, including inspection, must enforce its input's scope. */
+export const authorizeDeviceList = <A, E, R>(
+  scopes: ReadonlyArray<AuthEnvironmentScope>,
+  input: DeviceListInput,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | EnvironmentAuthorizationError, R> => {
+  const requiredScope = requiredScopeForDeviceList(input);
+  return scopes.includes(requiredScope)
+    ? effect
+    : Effect.fail(rpcAuthorizationError(requiredScope));
+};

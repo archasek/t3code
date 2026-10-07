@@ -101,6 +101,7 @@ export function isModelSelectionUnavailable(
 export function resolveSelectableModelSelection(
   config: T3ServerConfig | null | undefined,
   selection: ModelSelection | null,
+  _interactionMode: "default" | "plan" = "default",
 ): ModelSelection | null {
   if (!selection || !config) {
     return selection;
@@ -111,6 +112,14 @@ export function resolveSelectableModelSelection(
   const driver =
     provider?.driver ?? config.settings?.providerInstances[selection.instanceId]?.driver;
   if (driver === "antigravity") {
+    return selection;
+  }
+  if (
+    driver === "mastraCode" &&
+    provider?.enabled &&
+    provider.installed &&
+    provider.auth.status !== "unauthenticated"
+  ) {
     return selection;
   }
   return provider &&
@@ -129,8 +138,9 @@ export function resolveSelectableModelSelection(
 export function resolveDefaultableModelSelection(
   config: T3ServerConfig | null | undefined,
   selection: ModelSelection | null,
+  interactionMode: "default" | "plan" = "default",
 ): ModelSelection | null {
-  const usable = resolveSelectableModelSelection(config, selection);
+  const usable = resolveSelectableModelSelection(config, selection, interactionMode);
   if (!usable || !config) {
     return usable;
   }
@@ -145,20 +155,22 @@ export function resolveNewTaskModelSelection(input: {
   readonly stickySelection: ModelSelection | null;
   readonly modelOptions: ReadonlyArray<ModelOption>;
 }): ModelSelection | null {
-  return (
-    input.draftSelection ??
-    input.projectDefaultSelection ??
-    input.stickySelection ??
-    input.modelOptions.find((option) => option.isDefault && !option.isUnavailable)?.selection ??
-    input.modelOptions.find((option) => !option.isUnavailable)?.selection ??
-    null
-  );
+  const stored = input.draftSelection ?? input.projectDefaultSelection ?? input.stickySelection;
+  if (stored) return stored;
+  const fallback =
+    input.modelOptions.find((option) => option.isDefault && !option.isUnavailable) ??
+    input.modelOptions.find((option) => !option.isUnavailable);
+  if (!fallback) return null;
+  return fallback.providerDriver === "mastraCode"
+    ? { instanceId: fallback.selection.instanceId, model: "default" }
+    : fallback.selection;
 }
 
 export function buildModelOptions(
   config: T3ServerConfig | null | undefined,
   fallbackModelSelection: ModelSelection | null,
   providerInstanceId?: ModelSelection["instanceId"],
+  _interactionMode: "default" | "plan" = "default",
 ): ReadonlyArray<ModelOption> {
   const options = new Map<string, ModelOption>();
 
@@ -175,11 +187,15 @@ export function buildModelOptions(
 
     const providerLabel = providerDisplayLabel(provider);
     for (const model of provider.models) {
+      const customUnavailable = provider.driver === "mastraCode" && model.isCustom;
       const key = `${provider.instanceId}:${model.slug}`;
       options.set(key, {
         key,
         label: model.name,
-        subtitle: model.subProvider ?? "",
+        subtitle: customUnavailable
+          ? "Model not reported by Mastra Code."
+          : (model.subProvider ?? ""),
+        ...(customUnavailable ? { isUnavailable: true } : {}),
         providerKey: provider.instanceId,
         providerLabel,
         providerDriver: provider.driver,
@@ -198,6 +214,23 @@ export function buildModelOptions(
           model.capabilities,
         ),
       });
+    }
+    if (provider.driver === "mastraCode") {
+      const native = [...options.values()].find(
+        (option) => option.providerKey === provider.instanceId && !option.isUnavailable,
+      );
+      if (native) {
+        // Capability metadata does not select the catalog row's model. The
+        // native session still chooses and validates its own default model.
+        options.set(`${provider.instanceId}:default`, {
+          ...native,
+          key: `${provider.instanceId}:default`,
+          label: "Native default",
+          subtitle: "Use the model selected by Mastra Code.",
+          isDefault: true,
+          selection: { instanceId: provider.instanceId, model: "default" },
+        });
+      }
     }
   }
 
@@ -223,6 +256,11 @@ export function buildModelOptions(
       const model = provider?.models.find(
         (candidate) => candidate.slug === fallbackModelSelection.model,
       );
+      const nativeDefault =
+        provider?.driver === "mastraCode" &&
+        ["default", "auto", ""].includes(fallbackModelSelection.model)
+          ? options.get(`${provider.instanceId}:default`)
+          : undefined;
       const providerDriver =
         provider?.driver ?? instanceConfig?.driver ?? fallbackModelSelection.instanceId;
       const providerLabel = providerDisplayLabel({
@@ -239,10 +277,13 @@ export function buildModelOptions(
         providerDriver,
         isDefault: false,
         isLegacy: model?.isLegacy === true,
-        ...(isModelSelectionUnavailable(config, fallbackModelSelection)
+        ...(isModelSelectionUnavailable(config, fallbackModelSelection) ||
+        (providerDriver === "mastraCode" &&
+          !model &&
+          !["default", "auto", ""].includes(fallbackModelSelection.model))
           ? { isUnavailable: true }
           : {}),
-        capabilities: model?.capabilities ?? null,
+        capabilities: model?.capabilities ?? nativeDefault?.capabilities ?? null,
         selection: fallbackModelSelection,
       });
     }
@@ -276,6 +317,12 @@ function modelMenuAction(option: ModelOption, selectedModel: ModelSelection | nu
   return {
     id: `model:${option.key}`,
     title: option.label,
+    ...(option.providerDriver === "mastraCode"
+      ? {
+          subtitle: option.subtitle || undefined,
+          attributes: { disabled: option.isUnavailable === true },
+        }
+      : {}),
     state:
       option.selection.instanceId === selectedModel?.instanceId &&
       option.selection.model === selectedModel.model

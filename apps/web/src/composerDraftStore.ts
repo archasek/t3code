@@ -1307,22 +1307,23 @@ export function deriveEffectiveComposerModelState(input: {
   const activeSelectionInstanceId = instanceSelection
     ? (input.selectedInstanceId ?? ProviderInstanceId.make(input.selectedProvider))
     : ProviderInstanceId.make(input.selectedProvider);
-  const selectedModel = activeSelection?.model
-    ? (resolveAppModelSelectionForInstance(
-        activeSelectionInstanceId,
-        input.settings,
-        input.providers,
-        activeSelection.model,
-        { preserveUnavailableSelection: true },
-      ) ??
-      (input.selectedProvider === "antigravity" ? "" : null) ??
-      resolveAppModelSelection(
-        input.selectedProvider,
-        input.settings,
-        input.providers,
-        activeSelection.model,
-      ))
-    : baseModel;
+  const selectedModel =
+    activeSelection && (activeSelection.model || input.selectedProvider === "mastraCode")
+      ? (resolveAppModelSelectionForInstance(
+          activeSelectionInstanceId,
+          input.settings,
+          input.providers,
+          activeSelection.model,
+          { preserveUnavailableSelection: true },
+        ) ??
+        (input.selectedProvider === "antigravity" ? "" : null) ??
+        resolveAppModelSelection(
+          input.selectedProvider,
+          input.settings,
+          input.providers,
+          activeSelection.model,
+        ))
+      : baseModel;
   const modelOptions =
     modelSelectionByProviderToOptions(input.draft?.modelSelectionByProvider) ??
     providerSelectionsFromModelSelection(input.threadModelSelection) ??

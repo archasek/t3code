@@ -1,3 +1,7 @@
+import {
+  resolveRawUserInputAnswer,
+  toggleUserInputOption,
+} from "@t3tools/client-runtime/work-log/user-input";
 import type { UserInputQuestion } from "@t3tools/contracts";
 
 export interface PendingUserInputDraftAnswer {
@@ -44,9 +48,22 @@ export function resolvePendingUserInputAnswer(
   draft: PendingUserInputDraftAnswer | undefined,
 ): string | string[] | null {
   if (draft?.attachmentsBlocked) return null;
+  if (
+    question.allowCustomAnswer !== false &&
+    question.answerFormat === "raw-string" &&
+    draft?.customAnswer !== undefined
+  ) {
+    return resolveRawUserInputAnswer(question, draft.customAnswer);
+  }
+  const attachmentOnlyAnswerAllowed =
+    question.answerFormat !== "raw-string" || question.allowEmptyAnswer === true;
   const customAnswer =
-    question.allowCustomAnswer === false ? null : normalizeDraftAnswer(draft?.customAnswer);
-  if (customAnswer) {
+    question.allowCustomAnswer === false
+      ? null
+      : question.answerFormat === "raw-string"
+        ? resolveRawUserInputAnswer(question, draft?.customAnswer)
+        : normalizeDraftAnswer(draft?.customAnswer);
+  if (customAnswer !== null) {
     return customAnswer;
   }
 
@@ -56,23 +73,30 @@ export function resolvePendingUserInputAnswer(
   if (question.multiSelect) {
     return selectedOptionValues.length > 0
       ? selectedOptionValues
-      : question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0
+      : attachmentOnlyAnswerAllowed &&
+          question.allowCustomAnswer !== false &&
+          (draft?.attachmentCount ?? 0) > 0
         ? ""
         : null;
   }
 
   return (
     selectedOptionValues[0] ??
-    (question.allowCustomAnswer !== false && (draft?.attachmentCount ?? 0) > 0 ? "" : null)
+    (attachmentOnlyAnswerAllowed &&
+    question.allowCustomAnswer !== false &&
+    (draft?.attachmentCount ?? 0) > 0
+      ? ""
+      : null)
   );
 }
 
 export function setPendingUserInputCustomAnswer(
   draft: PendingUserInputDraftAnswer | undefined,
   customAnswer: string,
+  question?: UserInputQuestion,
 ): PendingUserInputDraftAnswer {
   const selectedOptionValues =
-    customAnswer.trim().length > 0
+    question?.answerFormat === "raw-string" || customAnswer.trim().length > 0
       ? undefined
       : normalizeSelectedOptionValues(draft?.selectedOptionValues);
 
@@ -111,12 +135,14 @@ export function togglePendingUserInputOptionSelection(
 ): PendingUserInputDraftAnswer {
   if (question.multiSelect) {
     const selectedOptionValues = normalizeSelectedOptionValues(draft?.selectedOptionValues);
-    const nextSelectedOptionValues = selectedOptionValues.includes(optionValue)
-      ? selectedOptionValues.filter((value) => value !== optionValue)
-      : [...selectedOptionValues, optionValue];
+    const nextSelectedOptionValues = toggleUserInputOption(
+      question.options,
+      selectedOptionValues,
+      optionValue,
+    );
 
     return {
-      customAnswer: "",
+      ...(question.answerFormat === "raw-string" ? {} : { customAnswer: "" }),
       ...(nextSelectedOptionValues.length > 0
         ? { selectedOptionValues: nextSelectedOptionValues }
         : {}),
@@ -124,7 +150,7 @@ export function togglePendingUserInputOptionSelection(
   }
 
   return {
-    customAnswer: "",
+    ...(question.answerFormat === "raw-string" ? {} : { customAnswer: "" }),
     selectedOptionValues: [optionValue],
   };
 }
@@ -162,7 +188,7 @@ export function findFirstUnansweredPendingUserInputQuestionIndex(
   draftAnswers: Record<string, PendingUserInputDraftAnswer>,
 ): number {
   const unansweredIndex = questions.findIndex(
-    (question) => !resolvePendingUserInputAnswer(question, draftAnswers[question.id]),
+    (question) => resolvePendingUserInputAnswer(question, draftAnswers[question.id]) === null,
   );
 
   return unansweredIndex === -1 ? Math.max(questions.length - 1, 0) : unansweredIndex;
@@ -193,10 +219,35 @@ export function derivePendingUserInputProgress(
     selectedOptionValues: normalizeSelectedOptionValues(activeDraft?.selectedOptionValues),
     customAnswer,
     resolvedAnswer,
-    usingCustomAnswer: customAnswer.trim().length > 0,
+    usingCustomAnswer:
+      activeQuestion?.answerFormat === "raw-string"
+        ? activeDraft?.customAnswer !== undefined
+        : customAnswer.trim().length > 0,
     answeredQuestionCount,
     isLastQuestion,
     isComplete: buildPendingUserInputAnswers(questions, draftAnswers) !== null,
     canAdvance: resolvedAnswer !== null,
   };
+}
+
+/** Literal inputs own their focus; only TipTap edits synchronize its cursor. */
+export function synchronizePendingUserInputCursor(
+  composer: {
+    readSnapshot: () => { value: string; cursor: number; expandedCursor: number } | undefined;
+    focusAt: (cursor: number) => void;
+  } | null,
+  value: string,
+  cursor: number,
+  expandedCursor: number,
+  origin?: "literal-input",
+): void {
+  if (origin === "literal-input") return;
+  const snapshot = composer?.readSnapshot();
+  if (
+    snapshot?.value !== value ||
+    snapshot.cursor !== cursor ||
+    snapshot.expandedCursor !== expandedCursor
+  ) {
+    composer?.focusAt(cursor);
+  }
 }

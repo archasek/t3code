@@ -37,7 +37,7 @@ import { composerContextSendBlockReason, reidentifyComposerContext } from "../li
 import { uuidv4 } from "../lib/uuid";
 
 import { makeQueuedMessageMetadata } from "../lib/commandMetadata";
-import { isModelSelectionUnavailable } from "../lib/modelOptions";
+import { isModelSelectionUnavailable, resolveSelectableModelSelection } from "../lib/modelOptions";
 import { resolveProviderInteractionMode } from "./legacy-plan-mode";
 import {
   convertPastedImagesToAttachments,
@@ -81,8 +81,8 @@ import {
   resolveComposerDispatchMode,
   type ActiveTurnComposerAction,
 } from "@t3tools/client-runtime/state/composer-dispatch";
-import { Atom } from "effect/unstable/reactivity";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { Atom } from "effect/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { prepareTurnAttachments } from "../lib/attachmentUpload";
 import { DEFAULT_FOLLOW_UP_BEHAVIOR } from "../lib/followUpBehavior";
 import { mobilePreferencesAtom } from "./preferences";
@@ -96,6 +96,7 @@ import {
   useQueuedRunEdit,
 } from "./queued-run-edit";
 import { setPendingConnectionError } from "../state/use-remote-environment-registry";
+import { clearThreadComposerError, setThreadComposerError } from "./thread-composer-error";
 import {
   useSelectedThreadProjection,
   useSelectedThreadVisibleTurnItems,
@@ -327,10 +328,11 @@ export function useThreadComposerState() {
   const draftAttachments = editedDraft?.attachments ?? [];
   const selectedThreadQueueCount = selectedThreadQueuedMessages.length;
   const selectedThread = selectedThreadShell;
-  const modelSelection = selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
+  const storedModelSelection =
+    selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;
   const selectedProvider = selectedEnvironmentRuntime?.serverConfig?.providers.find(
-    (provider) => provider.instanceId === modelSelection?.instanceId,
+    (provider) => provider.instanceId === storedModelSelection?.instanceId,
   );
   const interactionMode = selectedThread
     ? resolveProviderInteractionMode(
@@ -338,6 +340,14 @@ export function useThreadComposerState() {
         selectedDraft?.interactionMode ?? selectedThread.interactionMode,
       )
     : null;
+  const modelSelection =
+    selectedProvider?.driver === "mastraCode"
+      ? resolveSelectableModelSelection(
+          selectedEnvironmentRuntime?.serverConfig,
+          storedModelSelection,
+          interactionMode ?? "default",
+        )
+      : storedModelSelection;
   // Whether the model picker may leave this thread's provider. Derived here
   // because the projection already drives this hook; the composer only needs
   // the answer, not a subscription to every projection update.
@@ -452,7 +462,8 @@ export function useThreadComposerState() {
       });
     }
     endQueuedRunEdit(selectedThreadKey, { deferAttachmentCleanup: keepable });
-    setPendingConnectionError(
+    setThreadComposerError(
+      selectedThreadKey,
       keepable
         ? "That message already started. Your edit is back in the composer."
         : "That message already started, so the edit was discarded.",
@@ -602,8 +613,20 @@ export function useThreadComposerState() {
         return null;
       }
 
-      const modelSelection = draft.modelSelection ?? thread.modelSelection;
       const serverConfig = selectedEnvironmentRuntime?.serverConfig;
+      const storedSelection = draft.modelSelection ?? thread.modelSelection;
+      const selectionProvider = serverConfig?.providers.find(
+        (entry) => entry.instanceId === storedSelection.instanceId,
+      );
+      const sendInteractionMode = resolveProviderInteractionMode(
+        selectionProvider,
+        draft.interactionMode ?? thread.interactionMode,
+      );
+      const modelSelection =
+        selectionProvider?.driver === "mastraCode"
+          ? resolveSelectableModelSelection(serverConfig, storedSelection, sendInteractionMode)
+          : storedSelection;
+      if (!modelSelection) return null;
       if (
         selectedEnvironmentRuntime?.connectionState === "connected" &&
         isModelSelectionUnavailable(serverConfig, modelSelection)
@@ -670,6 +693,8 @@ export function useThreadComposerState() {
 
       const metadata = makeQueuedMessageMetadata();
       const messageId = MessageId.make(metadata.messageId);
+      // A new send supersedes the reason the previous one bounced back.
+      clearThreadComposerError(threadKey);
       // Enqueue publishes the queued atom synchronously (the durable write
       // happens behind it), so clearing the draft here gives send feedback on
       // the tap frame instead of after file I/O. If the write fails the message
@@ -706,7 +731,8 @@ export function useThreadComposerState() {
             attachments: [],
           });
           appendComposerDraftAttachments(threadKey, attachments, { allowOverflow: true });
-          setPendingConnectionError(
+          setThreadComposerError(
+            threadKey,
             error instanceof Error ? error.message : "Failed to save the queued message.",
           );
         },

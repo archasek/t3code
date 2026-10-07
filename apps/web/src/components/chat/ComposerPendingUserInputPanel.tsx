@@ -16,6 +16,7 @@ interface PendingUserInputPanelProps {
   answers: Record<string, PendingUserInputDraftAnswer>;
   questionIndex: number;
   onToggleOption: (questionId: string, optionValue: string) => void;
+  onChangeCustomAnswer: (questionId: string, value: string) => void;
   onAdvance: () => void;
   onDismiss: (requestId: RuntimeRequestId) => void;
 }
@@ -26,6 +27,7 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
   answers,
   questionIndex,
   onToggleOption,
+  onChangeCustomAnswer,
   onAdvance,
   onDismiss,
 }: PendingUserInputPanelProps) {
@@ -41,6 +43,7 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
       answers={answers}
       questionIndex={questionIndex}
       onToggleOption={onToggleOption}
+      onChangeCustomAnswer={onChangeCustomAnswer}
       onAdvance={onAdvance}
       onDismiss={onDismiss}
     />
@@ -53,6 +56,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   answers,
   questionIndex,
   onToggleOption,
+  onChangeCustomAnswer,
   onAdvance,
   onDismiss,
 }: {
@@ -61,6 +65,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   answers: Record<string, PendingUserInputDraftAnswer>;
   questionIndex: number;
   onToggleOption: (questionId: string, optionValue: string) => void;
+  onChangeCustomAnswer: (questionId: string, value: string) => void;
   onAdvance: () => void;
   onDismiss: (requestId: RuntimeRequestId) => void;
 }) {
@@ -97,7 +102,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       return;
     }
     if (
-      progress.customAnswer.trim().length === 0 &&
+      !progress.usingCustomAnswer &&
       progress.selectedOptionValues.includes(optimisticSingleSelect.optionValue)
     ) {
       setOptimisticSingleSelect(null);
@@ -106,6 +111,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     activeQuestion,
     optimisticSingleSelect,
     progress.customAnswer,
+    progress.usingCustomAnswer,
     progress.selectedOptionValues,
   ]);
 
@@ -135,6 +141,18 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       }, 200);
     },
     [activeQuestion, onToggleOption],
+  );
+
+  const handleLiteralAnswerChange = useCallback(
+    (questionId: string, value: string) => {
+      if (autoAdvanceTimerRef.current !== null) {
+        window.clearTimeout(autoAdvanceTimerRef.current);
+        autoAdvanceTimerRef.current = null;
+      }
+      setOptimisticSingleSelect(null);
+      onChangeCustomAnswer(questionId, value);
+    },
+    [onChangeCustomAnswer],
   );
 
   // Keyboard shortcut: number keys 1-9 select corresponding options when focus is
@@ -172,7 +190,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     return null;
   }
 
-  const customAnswerActive = progress.customAnswer.trim().length > 0;
+  const customAnswerActive = progress.usingCustomAnswer;
 
   return (
     <Collapsible
@@ -234,6 +252,33 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
         <ComposerBanner.Scroll>
           <ComposerBanner.Body className="pe-1 pb-1 wrap-anywhere">
             <p className="text-sm text-foreground/85">{activeQuestion.question}</p>
+            {activeQuestion.answerFormat === "raw-string" &&
+            activeQuestion.allowCustomAnswer !== false ? (
+              <div className="mt-2 space-y-2">
+                <textarea
+                  aria-label={`Literal value: ${activeQuestion.header}`}
+                  value={progress.customAnswer}
+                  disabled={responseDisabled}
+                  onChange={(event) =>
+                    handleLiteralAnswerChange(activeQuestion.id, event.target.value)
+                  }
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  rows={3}
+                  className="w-full rounded-md border border-border bg-background p-2 text-sm"
+                />
+                {activeQuestion.allowEmptyAnswer === true ? (
+                  <button
+                    type="button"
+                    disabled={responseDisabled}
+                    onClick={() => handleLiteralAnswerChange(activeQuestion.id, "")}
+                    className="text-xs text-muted-foreground underline"
+                  >
+                    Use empty value
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
             {activeQuestion.multiSelect ? (
               <p className="mt-1 text-secondary-label text-xs">Select one or more options.</p>
             ) : null}

@@ -42,3 +42,33 @@ export function hasQuestionAnswer(answer: UserInputAttachmentAnswerPayload): boo
     Object.values(answer.attachmentsByQuestionId).some((attachments) => attachments.length > 0)
   );
 }
+
+/** Exclusive choices replace every other choice; ordinary choices remove exclusive ones. */
+export function toggleUserInputOption(
+  options: ReadonlyArray<{
+    readonly label: string;
+    readonly value?: string | undefined;
+    readonly exclusive?: boolean | undefined;
+  }>,
+  selected: ReadonlyArray<string>,
+  value: string,
+): string[] {
+  if (selected.includes(value)) return selected.filter((entry) => entry !== value);
+  if (options.some((option) => (option.value ?? option.label) === value && option.exclusive))
+    return [value];
+  return [
+    ...selected.filter(
+      (entry) =>
+        !options.some((option) => (option.value ?? option.label) === entry && option.exclusive),
+    ),
+    value,
+  ];
+}
+
+/** Raw empty text is complete only when the server established schema eligibility. */
+export function resolveRawUserInputAnswer(
+  question: { readonly allowEmptyAnswer?: boolean | undefined },
+  value: string | undefined,
+): string | null {
+  return value === undefined || (value === "" && question.allowEmptyAnswer !== true) ? null : value;
+}

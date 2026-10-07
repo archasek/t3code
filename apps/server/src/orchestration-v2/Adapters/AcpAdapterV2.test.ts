@@ -12,6 +12,9 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   CheckpointId,
+  CommandId,
+  ORCHESTRATION_V2_WS_METHODS,
+  OrchestrationV2DispatchCommandError,
   GrokSettings,
   EnvironmentId,
   MessageId,
@@ -26,6 +29,7 @@ import {
   RunId,
   ThreadId,
   type OrchestrationV2ProviderThread,
+  type OrchestrationV2ThreadStreamItem,
 } from "@t3tools/contracts";
 import { HostProcessIsExecutable, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
@@ -49,12 +53,13 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
 import * as ServerConfig from "../../config.ts";
+import { openMastraCodeSocketFixture } from "../../../integration/MastraCodeSocketFixture.integration.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import * as AcpSessionRuntime from "../../provider/acp/AcpSessionRuntime.ts";
 import {
@@ -93,6 +98,18 @@ import {
 } from "./AcpAdapterV2.ts";
 
 import { makeGrokAdapterV2 } from "./GrokAdapterV2.ts";
+import { makeMastraCodeAdapterV2 } from "./MastraCodeAdapterV2.ts";
+import { createFetchWrapper } from "./MastraCodeFixture.ts";
+import { applyMastraCodeModelSelection } from "../../provider/MastraCodeModelSelection.ts";
+import {
+  acquireMastraCodeFormAdmission,
+  validateMastraCodeStringConstraints,
+} from "../../provider/MastraCodeElicitationValidation.ts";
+import { prepareMastraCodeForm } from "../../provider/MastraCodeForm.ts";
+import * as Orchestrator from "../Orchestrator.ts";
+import * as EffectWorker from "../EffectWorker.ts";
+import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
+import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
 import {
   acpRegistryPromptFailure,
   registerMistralVibeAcpExtensions,
@@ -100,13 +117,14 @@ import {
 
 const DEFAULT_GROK_SETTINGS = Schema.decodeSync(GrokSettings)({});
 
-const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
+const layerServerConfig = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-acp-v2-adapter-",
 }).pipe(Layer.provide(NodeServices.layer));
 
-const testLayer = Layer.mergeAll(NodeServices.layer, IdAllocator.layer, serverConfigLayer);
+const layerTest = Layer.mergeAll(NodeServices.layer, IdAllocator.layer, layerServerConfig);
 const ACP_TEST_DRIVER = ProviderDriverKind.make("acp-test");
 const decodeUnknownJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
+const encodeFixtureJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 describe("acpProjectedCommandExitCode", () => {
   const successOutput = { type: "Bash", exit_code: 0 };
@@ -692,7 +710,7 @@ describe("AcpAdapterV2", () => {
           assert.equal(retries.at(-1)?.status, "completed");
           assert.equal(retries.at(-1)?.title, "Provider recovered");
         }
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it("preserves legacy ids and scopes v2 ids by provider instance", () => {
@@ -707,77 +725,93 @@ describe("AcpAdapterV2", () => {
     );
   });
 
-  it.effect("starts the MCP bridge directly from the self-contained runtime", () =>
-    Effect.gen(function* () {
-      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const idAllocator = yield* IdAllocator.IdAllocatorV2;
-      const path = yield* Path.Path;
-      const serverConfig = yield* ServerConfig.ServerConfig;
-      const selfInvocation = yield* resolveSelfInvocation().pipe(
-        Effect.provideService(HostProcessIsExecutable, true),
-      );
-      const mockAgentPath = yield* path.fromFileUrl(
-        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
-      );
+  it.effect.each(["stdio", "http"] as const)(
+    "starts the MCP bridge directly from the self-contained runtime using %s",
+    (transport) =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const path = yield* Path.Path;
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const selfInvocation = yield* resolveSelfInvocation().pipe(
+          Effect.provideService(HostProcessIsExecutable, true),
+        );
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
 
-      const instanceId = ProviderInstanceId.make("acp-test-self-contained-mcp-bridge");
-      const threadId = ThreadId.make("thread-acp-self-contained-mcp-bridge");
-      McpProviderSession.setMcpProviderSession({
-        environmentId: EnvironmentId.make("environment-acp-self-contained-mcp-bridge"),
-        threadId,
-        providerSessionId: "mcp-session-acp-self-contained-mcp-bridge",
-        providerInstanceId: instanceId,
-        endpoint: "http://127.0.0.1:43123/mcp",
-        authorizationHeader: "Bearer self-contained-mcp-bridge-token",
-        browserToolsAvailable: false,
-      });
-      yield* Effect.addFinalizer(() =>
-        Effect.sync(() => {
-          McpProviderSession.clearMcpProviderSession(threadId);
-        }),
-      );
+        const instanceId = ProviderInstanceId.make("acp-test-self-contained-mcp-bridge");
+        const threadId = ThreadId.make("thread-acp-self-contained-mcp-bridge");
+        McpProviderSession.setMcpProviderSession({
+          environmentId: EnvironmentId.make("environment-acp-self-contained-mcp-bridge"),
+          threadId,
+          providerSessionId: "mcp-session-acp-self-contained-mcp-bridge",
+          providerInstanceId: instanceId,
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer self-contained-mcp-bridge-token",
+          browserToolsAvailable: false,
+        });
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            McpProviderSession.clearMcpProviderSession(threadId);
+          }),
+        );
 
-      let runtimeInput: AcpAdapterV2RuntimeInput | undefined;
-      const makeRuntime = makeMockRuntime({ childProcessSpawner, mockAgentPath });
-      const adapter = makeAcpAdapterV2({
-        crypto: yield* Crypto.Crypto,
-        instanceId,
-        flavor: {
-          driver: ACP_TEST_DRIVER,
-          capabilities: AcpProviderCapabilitiesV2,
-          makeRuntime: (input) =>
-            Effect.sync(() => {
-              runtimeInput = input;
-            }).pipe(Effect.andThen(makeRuntime(input))),
-        },
-        fileSystem,
-        idAllocator,
-        serverConfig,
-        selfInvocation,
-      });
-      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        cwd: process.cwd(),
-      });
-      const modelSelection = { instanceId, model: "default" } as const;
-      yield* adapter.openSession({
-        threadId,
-        providerSessionId: ProviderSessionId.make("provider-session-acp-self-contained-mcp-bridge"),
-        modelSelection,
-        runtimePolicy,
-      });
+        let runtimeInput: AcpAdapterV2RuntimeInput | undefined;
+        const makeRuntime = makeMockRuntime({ childProcessSpawner, mockAgentPath });
+        const adapter = makeAcpAdapterV2({
+          crypto: yield* Crypto.Crypto,
+          instanceId,
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            mcpTransport: transport,
+            makeRuntime: (input) =>
+              Effect.sync(() => {
+                runtimeInput = input;
+              }).pipe(Effect.andThen(makeRuntime(input))),
+          },
+          fileSystem,
+          idAllocator,
+          serverConfig,
+          selfInvocation,
+        });
+        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+        yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make(
+            "provider-session-acp-self-contained-mcp-bridge",
+          ),
+          modelSelection,
+          runtimePolicy,
+        });
 
-      const mcpServer = runtimeInput?.mcpServers[0];
-      if (mcpServer === undefined || !("command" in mcpServer)) {
-        return yield* Effect.die("ACP runtime must receive the t3-code stdio MCP server");
-      }
-      assert.equal(mcpServer.command, process.execPath);
-      assert.deepEqual(mcpServer.args, ["acp-mcp-bridge"]);
-      assert.equal(runtimeInput?.processEnvironment?.T3_ACP_MCP_NODE, process.execPath);
-      assert.equal(runtimeInput?.processEnvironment?.T3_ACP_MCP_ENTRYPOINT, undefined);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+        const mcpServer = runtimeInput?.mcpServers[0];
+        if (transport === "http") {
+          assert.deepEqual(mcpServer, {
+            type: "http",
+            name: "t3-code",
+            url: "http://127.0.0.1:43123/mcp",
+            headers: [{ name: "Authorization", value: "Bearer self-contained-mcp-bridge-token" }],
+          });
+          assert.deepEqual(runtimeInput?.acpMcpServers, []);
+          assert.isUndefined(runtimeInput?.processEnvironment);
+          return;
+        }
+        if (mcpServer === undefined || !("command" in mcpServer)) {
+          return yield* Effect.die("ACP runtime must receive the t3-code stdio MCP server");
+        }
+        assert.equal(mcpServer.command, process.execPath);
+        assert.deepEqual(mcpServer.args, ["acp-mcp-bridge"]);
+        assert.equal(runtimeInput?.processEnvironment?.T3_ACP_MCP_NODE, process.execPath);
+        assert.equal(runtimeInput?.processEnvironment?.T3_ACP_MCP_ENTRYPOINT, undefined);
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("refreshes ACP prompt instructions when the interaction mode changes", () =>
@@ -904,7 +938,7 @@ describe("AcpAdapterV2", () => {
         "session/set_config_option",
         "Build should restore the native mode that T3 temporarily replaced for Plan",
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("starts a new replay message after ACP v2 plan boundaries", () =>
@@ -995,7 +1029,7 @@ describe("AcpAdapterV2", () => {
         snapshot.messages.map((message) => message.text),
         ["before plan", "after plan"],
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("keeps Devin parent paragraphs intact while projecting native child work", () =>
@@ -1008,9 +1042,12 @@ describe("AcpAdapterV2", () => {
       );
       type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
       let handler: Parameters<Runtime["handleSessionUpdate"]>[0] | undefined;
+      let createTerminal: Parameters<Runtime["handleCreateTerminal"]>[0] | undefined;
       const instanceId = ProviderInstanceId.make("devin-replay");
       const adapter = makeAcpAdapterV2({
         instanceId,
+        // Production Devin runs commands through client terminals.
+        clientTerminals: { childProcessSpawner, shellCommands: true },
         crypto: yield* Crypto.Crypto,
         fileSystem: yield* FileSystem.FileSystem,
         idAllocator,
@@ -1031,12 +1068,34 @@ describe("AcpAdapterV2", () => {
                 Effect.sync(() => {
                   handler = next;
                 }).pipe(Effect.andThen(runtime.handleSessionUpdate(next))),
+              handleCreateTerminal: (next) =>
+                Effect.sync(() => {
+                  createTerminal = next;
+                }).pipe(Effect.andThen(runtime.handleCreateTerminal(next))),
               prompt: () =>
                 Effect.gen(function* () {
                   assert.isDefined(handler);
+                  assert.isDefined(createTerminal);
+                  const fallbackTerminal = yield* createTerminal(
+                    { sessionId: "mock-session-1", command: "true acp-mcp-call task_status {}" },
+                    { requestId: "child-mcp-terminal", method: "terminal/create" },
+                  );
                   // Production thread 54aeb6d7 split after "(command". Metadata shapes
                   // below were captured from live Devin sessions showy-mile/fragrant-chamomile.
                   const updates = [
+                    {
+                      sessionUpdate: "tool_call_update",
+                      toolCallId: "child-a",
+                      status: "in_progress",
+                      _meta: {
+                        "cognition.ai/subagent_started": {
+                          agentId: "child-a",
+                          title: "Map orchestration",
+                          task: "Run pwd, then reply ONE.",
+                          model: " \t ",
+                        },
+                      },
+                    },
                     {
                       sessionUpdate: "tool_call_update",
                       toolCallId: "child-a",
@@ -1074,6 +1133,48 @@ describe("AcpAdapterV2", () => {
                         "cognition.ai/inferenceToolName": "exec",
                         "cognition.ai/subagent_context": { parentAgentId: "child-a" },
                       },
+                    },
+                    {
+                      sessionUpdate: "tool_call",
+                      toolCallId: "child-weather",
+                      title: "Check weather",
+                      status: "completed",
+                      rawInput: { server: "weather", tool: "get_weather", city: "Berlin" },
+                      rawOutput: {
+                        result: {
+                          _meta: {
+                            source: { name: "Weather", logoUrl: "https://example.com/weather.png" },
+                          },
+                          content: [{ type: "text", text: "Sunny" }],
+                        },
+                      },
+                      _meta: {
+                        is_mcp_tool_call: true,
+                        "cognition.ai/subagent_context": { parentAgentId: "child-a" },
+                      },
+                    },
+                    {
+                      sessionUpdate: "tool_call",
+                      toolCallId: "child-mcp-fallback",
+                      title: "Ran command",
+                      kind: "execute",
+                      status: "completed",
+                      content: [{ type: "terminal", terminalId: fallbackTerminal.terminalId }],
+                      _meta: { "cognition.ai/subagent_context": { parentAgentId: "child-a" } },
+                    },
+                    {
+                      sessionUpdate: "tool_call",
+                      toolCallId: "parent-weather",
+                      title: "Check weather",
+                      status: "completed",
+                      rawInput: { server: "weather", tool: "get_weather", city: "Berlin" },
+                      rawOutput: {
+                        _meta: {
+                          source: { name: "Weather", logoUrl: "https://example.com/weather.png" },
+                        },
+                        content: [{ type: "text", text: "Sunny" }],
+                      },
+                      _meta: { is_mcp_tool_call: true },
                     },
                     {
                       sessionUpdate: "agent_message_chunk",
@@ -1181,6 +1282,18 @@ describe("AcpAdapterV2", () => {
         event.type === "subagent.updated" ? [event.subagent] : [],
       );
       const task = tasks.at(-1);
+      assert.isNull(tasks[0]?.model);
+      const childThread = events.find(
+        (event) =>
+          event.type === "app_thread.created" && event.appThread.id === task?.childThreadId,
+      );
+      assert.equal(
+        childThread?.type === "app_thread.created"
+          ? childThread.appThread.modelSelection.model
+          : undefined,
+        modelSelection.model,
+      );
+      assert.equal(task?.model, "SWE-1.7 Medium");
       assert.equal(task?.status, "completed");
       assert.equal(task?.result, "Final report: ONE");
       const childMessages = new Map(
@@ -1192,6 +1305,37 @@ describe("AcpAdapterV2", () => {
       );
       assert.deepEqual([...childMessages.values()], ["Checking the code.", "ONE"]);
       assert.equal(task?.prompt, "Run pwd, then reply ONE.");
+      // Terminal-fallback MCP calls in a child session keep their T3 identity.
+      assert.isTrue(
+        items.some(
+          (item) =>
+            item.threadId === task?.childThreadId &&
+            item.type === "dynamic_tool" &&
+            item.toolName === "t3-code.task_status",
+        ),
+      );
+      const childMcp = items.find(
+        (item) =>
+          item.threadId === task?.childThreadId &&
+          item.type === "dynamic_tool" &&
+          item.toolName === "weather.get_weather",
+      );
+      const parentMcp = items.find(
+        (item) =>
+          item.threadId === threadId &&
+          item.type === "dynamic_tool" &&
+          item.toolName === "weather.get_weather",
+      );
+      for (const item of [parentMcp, childMcp]) {
+        assert.equal(item?.title, "get weather");
+        assert.deepEqual(item?.toolSource, {
+          key: "mcp:weather",
+          name: "Weather",
+          kind: "integration",
+          icon: { _tag: "themed-logo", logoUrl: "https://example.com/weather.png" },
+        });
+        assert.deepEqual(item?.toolIcon, item?.toolSource?.icon);
+      }
       assert.isTrue(
         items.some(
           (item) =>
@@ -1216,9 +1360,9 @@ describe("AcpAdapterV2", () => {
       const parentTools = items.filter(
         (item) => item.threadId === threadId && item.type === "dynamic_tool",
       );
-      assert.equal(parentTools.length, 1);
+      assert.equal(parentTools.length, 2);
       assert.equal(parentTools[0]?.title, "Parent tool finished");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("projects ACP v2 fidelity updates into first-class orchestration items", () =>
@@ -1410,7 +1554,7 @@ describe("AcpAdapterV2", () => {
         afterOmittedPatch.messages.some((message) => message.text === "late authoritative text"),
         "omitted late message content must preserve the authoritative text",
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live(
@@ -1497,7 +1641,55 @@ describe("AcpAdapterV2", () => {
             nativeTurnId: "persisted-session:turn:1",
           }),
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.live(
+    "rejects failed required native restore without creating a replacement conversation",
+    () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
+        const instanceId = ProviderInstanceId.make("mc-required-restore");
+        const adapter = makeAcpAdapterV2({
+          crypto: yield* Crypto.Crypto,
+          instanceId,
+          fileSystem: yield* FileSystem.FileSystem,
+          idAllocator: yield* IdAllocator.IdAllocatorV2,
+          serverConfig: yield* ServerConfig.ServerConfig,
+          selfInvocation: yield* resolveSelfInvocation(),
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            requireNativeSessionRestore: true,
+            makeRuntime: makeMockRuntime({
+              childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+              mockAgentPath: yield* path.fromFileUrl(
+                new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+              ),
+              protocolEvents,
+              environment: { T3_ACP_FAIL_LOAD_SESSION: "1" },
+            }),
+          },
+        });
+        const error = yield* adapter
+          .openSession({
+            threadId: ThreadId.make("mc-required-restore"),
+            providerSessionId: ProviderSessionId.make("mc-required-restore"),
+            modelSelection: { instanceId, model: "default" },
+            runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: process.cwd(),
+            }),
+            initialNativeThreadId: "stale-session",
+          })
+          .pipe(Effect.flip);
+        assert.equal(error._tag, "ProviderAdapterOpenSessionError");
+        const methods = yield* pollProtocolMethods(protocolEvents);
+        assert.equal(methods.filter((method) => method === "session/resume").length, 1);
+        assert.notInclude(methods, "session/new");
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("preserves new-session fallback when an eager ACP session load is stale", () =>
@@ -1604,7 +1796,7 @@ describe("AcpAdapterV2", () => {
           ),
         }),
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("cleans detached fixtures when an assertion aborts the test scope", () =>
@@ -1643,7 +1835,7 @@ describe("AcpAdapterV2", () => {
         Option.isSome(yield* waitForProcessesToExit(published)),
         "detached cleanup finalizer must reap the Bash and sleep fixture",
       );
-    }).pipe(Effect.provide(testLayer)),
+    }).pipe(Effect.provide(layerTest)),
   );
 
   it.live("replaces an unexpectedly terminated ACP runtime before the next turn", () =>
@@ -1725,7 +1917,11 @@ describe("AcpAdapterV2", () => {
       );
       assert.equal(runtimeOrdinalSeen, 2);
       assert.lengthOf(runtimeInputs, 2);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+      assert.deepEqual(
+        runtimeInputs.map((runtimeInput) => runtimeInput.threadId),
+        [threadId, threadId],
+      );
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("reaps detached native work when the provider exits before explicit teardown", () =>
@@ -1810,7 +2006,7 @@ describe("AcpAdapterV2", () => {
         Option.isSome(yield* waitForProcessesToExit(pids)),
         "provider termination must reap the detached launcher, Bash, and sleep processes",
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("surfaces reduced guarantee when delegated cgroup containment is unavailable", () =>
@@ -1867,7 +2063,7 @@ describe("AcpAdapterV2", () => {
       });
       yield* runtime.ensureThread({ threadId, modelSelection, runtimePolicy });
       assert.equal(containment, "process-ledger-reduced-guarantee");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("cleans a cgroup lease when the pre-exec join wrapper fails", () =>
@@ -1945,9 +2141,894 @@ describe("AcpAdapterV2", () => {
       assert.equal(createCalls, 1);
       assert.isAtLeast(killCalls, 1);
       assert.isAtLeast(removeCalls, 1);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
+  it.live.skipIf(
+    !process.env.T3_MASTRA_CODE_CLI && process.env.T3_MASTRA_CODE_REQUIRE_INTEGRATION !== "1",
+  )(
+    "runs real MC through V2 and restores its native conversation offline",
+    () =>
+      Effect.gen(function* () {
+        const cliPath = process.env.T3_MASTRA_CODE_CLI;
+        if (!cliPath) throw new Error("T3_MASTRA_CODE_CLI is required");
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-mc-v2-real-" });
+        const appDataDirectory = path.join(root, "app");
+        const home = path.join(root, "home");
+        const workspace = path.join(root, "workspace");
+        const fixture = path.join(root, "fixture");
+        const waitForFixtureFile = (name: string) =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const target = path.join(fixture, name);
+              if (yield* fs.exists(target)) return;
+              const watcher = yield* fs.watch(fixture).pipe(
+                Stream.filterEffect(() => fs.exists(target)),
+                Stream.take(1),
+                Stream.runDrain,
+                Effect.forkScoped({ startImmediately: true }),
+              );
+              if (yield* fs.exists(target)) return;
+              yield* Fiber.join(watcher);
+            }),
+          ).pipe(Effect.timeout("20 seconds"));
+        for (const directory of [appDataDirectory, home, workspace, fixture]) {
+          yield* fs.makeDirectory(directory, { recursive: true, mode: 0o700 });
+        }
+        yield* fs.writeFileString(
+          path.join(appDataDirectory, "auth.json"),
+          encodeFixtureJson({
+            "openai-codex": {
+              type: "oauth",
+              access: "test-only-synthetic-access-token",
+              refresh: "test-only-synthetic-refresh-token",
+              expires: 4_102_444_800_000,
+              accountId: "test-only-account",
+            },
+            "accounts:openai-codex:integration-fixture": {
+              type: "oauth-account",
+              id: "openai-codex:integration-fixture",
+              label: "Isolated integration fixture",
+              addedAt: "2026-10-06T00:00:00.000Z",
+              active: true,
+              access: "test-only-synthetic-access-token",
+              refresh: "test-only-synthetic-refresh-token",
+              expires: 4_102_444_800_000,
+              accountId: "test-only-account",
+            },
+          }),
+        );
+        yield* fs.chmod(path.join(appDataDirectory, "auth.json"), 0o600);
+        const catalogFetchedAt = yield* Clock.currentTimeMillis;
+        const catalogPath = path.join(appDataDirectory, "openai-codex-model-catalog.json");
+        const catalogFixture = {
+          schemaVersion: 1,
+          provider: "openai-codex",
+          scope: {
+            kind: "registered",
+            accountInstanceId: "openai-codex:integration-fixture",
+            accountId: "test-only-account",
+          },
+          endpoint: "https://chatgpt.com/backend-api/codex/models",
+          clientVersion: "0.160.0",
+          fetchedAt: catalogFetchedAt,
+          expiresAt: catalogFetchedAt + 60 * 60 * 1000,
+          slugs: ["gpt-6.1-sol", "gpt-5.6-sol", "gpt-6-luna"],
+        };
+        yield* fs.writeFileString(catalogPath, encodeFixtureJson(catalogFixture));
+        yield* fs.chmod(path.join(appDataDirectory, "openai-codex-model-catalog.json"), 0o600);
+        const configuredSettings = {
+          onboarding: { quietModePreferenceSelected: true },
+          models: {
+            modeDefaults: {
+              build: "openai/gpt-6.1-sol",
+              plan: "openai/gpt-6.1-sol",
+              fast: "openai/gpt-6-luna",
+            },
+          },
+          observability: { resources: {}, localTracing: true },
+        };
+        const wrapper = path.join(root, "wrapper.mjs");
+        yield* fs.writeFileString(wrapper, createFetchWrapper(cliPath));
+        const launcher = path.join(root, "mastracode");
+        yield* fs.writeFileString(
+          launcher,
+          `#!${process.execPath}\nrequire('node:child_process').execFileSync(process.execPath, [${encodeFixtureJson(wrapper)}, ...process.argv.slice(2)], {stdio:'inherit'});\n`,
+        );
+        yield* fs.chmod(launcher, 0o700);
+        const instanceId = ProviderInstanceId.make("mc-real-v2");
+        const observedThinking: string[] = [];
+        const adapter = makeMastraCodeAdapterV2({
+          instanceId,
+          appDataDirectory,
+          settings: { enabled: true, binaryPath: launcher, customModels: [] },
+          path,
+          platform: yield* HostProcessPlatform,
+          environment: {
+            PATH: process.env.PATH,
+            HOME: home,
+            CODEX_HOME: path.join(home, ".codex"),
+            MASTRA_APP_DATA_DIR: appDataDirectory,
+            T3_MASTRA_CODE_FIXTURE_DIR: fixture,
+            XDG_CONFIG_HOME: path.join(home, ".config"),
+            XDG_DATA_HOME: path.join(home, ".local/share"),
+            XDG_CACHE_HOME: path.join(home, ".cache"),
+            TMPDIR: root,
+          },
+          crypto: yield* Crypto.Crypto,
+          fileSystem: fs,
+          childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+          idAllocator: yield* IdAllocator.IdAllocatorV2,
+          serverConfig: yield* ServerConfig.ServerConfig,
+          selfInvocation: yield* resolveSelfInvocation(),
+          wrapRuntime: (task) =>
+            task.pipe(
+              Effect.map((runtime) => ({
+                ...runtime,
+                getConfigOptions: runtime.getConfigOptions.pipe(
+                  Effect.tap((options) =>
+                    Effect.sync(() => {
+                      const value = options.find(
+                        (option) => option.id === "thought_level",
+                      )?.currentValue;
+                      if (typeof value === "string") observedThinking.push(value);
+                    }),
+                  ),
+                ),
+              })),
+            ),
+        });
+        const threadId = ThreadId.make("mc-real-v2");
+        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: workspace,
+        });
+        assert.equal(yield* fs.exists(path.join(appDataDirectory, "settings.json")), false);
+        const defaultSelection = { instanceId, model: "default" } as const;
+        const admitFreshThread = (suffix: string) =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const freshThreadId = ThreadId.make(`mc-native-blank-${suffix}`);
+              const session = yield* adapter.openSession({
+                threadId: freshThreadId,
+                providerSessionId: ProviderSessionId.make(`mc-native-blank-${suffix}`),
+                modelSelection: defaultSelection,
+                runtimePolicy,
+              });
+              return yield* session.ensureThread({
+                threadId: freshThreadId,
+                modelSelection: defaultSelection,
+                runtimePolicy,
+              });
+            }),
+          );
+        const freshThread = yield* admitFreshThread("default");
+        assert.equal(freshThread.nativeMetadata?.modelSelection?.model, "openai/gpt-5.6-sol");
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const lunaThreadId = ThreadId.make("mc-native-luna-modes");
+            const lunaSelection = { instanceId, model: "openai/gpt-6-luna" } as const;
+            const session = yield* adapter.openSession({
+              threadId: lunaThreadId,
+              providerSessionId: ProviderSessionId.make("mc-native-luna-modes"),
+              modelSelection: lunaSelection,
+              runtimePolicy,
+            });
+            for (const interactionMode of ["default", "plan", "default"] as const) {
+              const observed = yield* session.ensureThread({
+                threadId: lunaThreadId,
+                modelSelection: lunaSelection,
+                runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+                  runtimeMode: "approval-required",
+                  interactionMode,
+                  cwd: workspace,
+                }),
+              });
+              assert.equal(observed.nativeMetadata?.modelSelection?.model, "openai/gpt-6-luna");
+            }
+          }),
+        );
+        yield* fs.writeFileString(
+          catalogPath,
+          encodeFixtureJson({ ...catalogFixture, slugs: ["gpt-6.1-sol", "gpt-6-luna"] }),
+        );
+        const missingDefault = yield* Effect.exit(admitFreshThread("missing-default"));
+        if (Exit.isSuccess(missingDefault))
+          assert.fail("An absent native default must reject admission");
+        assert.include(Cause.pretty(missingDefault.cause), "unavailable for this account");
+        yield* fs.writeFileString(catalogPath, encodeFixtureJson(catalogFixture));
+        yield* fs.writeFileString(
+          path.join(appDataDirectory, "settings.json"),
+          encodeFixtureJson(configuredSettings),
+        );
+        const modelSelection = {
+          instanceId,
+          model: "openai/gpt-6.1-sol",
+          options: [{ id: "thought_level", value: "high" }],
+        } as const;
+        const firstScope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(firstScope, Exit.void));
+        const first = yield* adapter
+          .openSession({
+            threadId,
+            providerSessionId: ProviderSessionId.make("mc-real-first"),
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.provideService(Scope.Scope, firstScope));
+        const providerThread = yield* first.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.equal(providerThread.nativeMetadata?.modelSelection?.model, "openai/gpt-6.1-sol");
+        assert.deepEqual(providerThread.nativeMetadata?.modelSelection?.options, [
+          { id: "mode", value: "build" },
+          { id: "thought_level", value: "high" },
+        ]);
+        yield* first.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            modelSelection,
+            messageText: "T3-MC-FIXTURE-RESUME",
+          }),
+        );
+        const terminal = yield* first.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+        assert.isTrue(Option.isSome(terminal));
+        const firstTerminal = Option.getOrThrow(terminal);
+        assert.equal(firstTerminal.type, "turn.terminal");
+        if (firstTerminal.type === "turn.terminal") assert.equal(firstTerminal.status, "completed");
+        const firstRequest = yield* Schema.decodeEffect(
+          Schema.fromJsonString(Schema.Struct({ reasoningEffort: Schema.String })),
+        )(yield* fs.readFileString(path.join(fixture, "paths-RESUME.json")));
+        assert.equal(firstRequest.reasoningEffort, "high");
+        yield* Scope.close(firstScope, Exit.void);
+        yield* fs.remove(path.join(fixture, "paths-RESUME.json"));
+        const persistedNativeId = providerThread.nativeThreadRef?.nativeId;
+        if (typeof persistedNativeId !== "string")
+          return yield* Effect.die("MC did not return a native conversation ID");
+        // Do not reapply effort: prove that native thread storage restored it.
+        const restoredSelection = { instanceId, model: "default" } as const;
+        observedThinking.length = 0;
+        const restored = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("mc-real-restored"),
+          modelSelection: restoredSelection,
+          runtimePolicy,
+          initialNativeThreadId: persistedNativeId,
+        });
+        const binding = yield* restored.ensureThread({
+          threadId,
+          modelSelection: restoredSelection,
+          runtimePolicy,
+        });
+        assert.equal(observedThinking.at(-1), "high");
+        assert.equal(binding.nativeThreadRef?.nativeId, providerThread.nativeThreadRef?.nativeId);
+        yield* restored.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread: binding,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 2,
+            messageText: "T3-MC-FIXTURE-RESUME",
+          }),
+        );
+        const resumedTerminal = yield* restored.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+        assert.isTrue(Option.isSome(resumedTerminal));
+        const lastTerminal = Option.getOrThrow(resumedTerminal);
+        assert.equal(lastTerminal.type, "turn.terminal");
+        if (lastTerminal.type === "turn.terminal") assert.equal(lastTerminal.status, "completed");
+        const restoredRequest = yield* Schema.decodeEffect(
+          Schema.fromJsonString(Schema.Struct({ reasoningEffort: Schema.String })),
+        )(yield* fs.readFileString(path.join(fixture, "paths-RESUME.json")));
+        assert.equal(restoredRequest.reasoningEffort, "high");
+        for (const [index, marker] of ["ALLOW", "REJECT", "ASK", "PLAN"].entries()) {
+          const turnPolicy =
+            marker === "PLAN"
+              ? ProviderAdapterV2RuntimePolicy.make({
+                  runtimeMode: "full-access",
+                  interactionMode: "plan",
+                  cwd: workspace,
+                })
+              : runtimePolicy;
+          yield* restored.startTurn(
+            makeTurnInput({
+              threadId,
+              providerThread: binding,
+              instanceId,
+              runtimePolicy: turnPolicy,
+              now: yield* DateTime.now,
+              ordinal: index + 3,
+              messageText: `T3-MC-FIXTURE-${marker}`,
+            }),
+          );
+          const events = yield* Queue.unbounded<ProviderAdapterV2Event>();
+          const listener = yield* restored.events.pipe(
+            Stream.runForEach((event) => Queue.offer(events, event)),
+            Effect.forkScoped,
+          );
+          let permissions = 0;
+          let questions = 0;
+          let plans = 0;
+          let completed = false;
+          while (!completed) {
+            const event = yield* Queue.take(events);
+            if (event.type === "plan.updated" && event.plan.kind === "proposed_plan") {
+              plans += 1;
+              assert.equal(marker, "PLAN");
+              assert.equal(
+                event.plan.markdown,
+                "# Native fixture plan\n\nPreserve the existing conversation.",
+              );
+            }
+            if (
+              event.type === "runtime_request.updated" &&
+              event.runtimeRequest.status === "pending" &&
+              event.runtimeRequest.kind !== "user_input"
+            ) {
+              permissions += 1;
+              if (marker === "PLAN") assert.isAtLeast(plans, 1);
+              yield* restored.respondToRuntimeRequest({
+                requestId: event.runtimeRequest.id,
+                decision: marker === "REJECT" ? "decline" : "accept",
+              });
+            }
+            if (
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "user_input_request" &&
+              event.turnItem.status === "waiting"
+            ) {
+              questions += 1;
+              assert.equal(marker, "ASK");
+              assert.equal(event.turnItem.questions.length, 1);
+              const response = {
+                requestId: event.turnItem.requestId,
+                answers: { [event.turnItem.questions[0]!.id]: ["Blue"] },
+              };
+              const racedAnswers = yield* Effect.all(
+                [
+                  restored.respondToRuntimeRequest(response).pipe(Effect.exit),
+                  restored.respondToRuntimeRequest(response).pipe(Effect.exit),
+                ],
+                { concurrency: 2 },
+              );
+              assert.equal(racedAnswers.filter(Exit.isSuccess).length, 1);
+              assert.equal(racedAnswers.filter(Exit.isFailure).length, 1);
+            }
+            if (event.type === "turn.terminal") {
+              assert.equal(event.status, "completed");
+              completed = true;
+            }
+          }
+          yield* Fiber.interrupt(listener);
+          // Native MC asks once to run submit_plan and once for its suspension.
+          // Both must remain explicit even when the T3 policy is full-access.
+          assert.equal(permissions, marker === "ALLOW" || marker === "PLAN" ? 2 : 1);
+          assert.equal(questions, marker === "ASK" ? 1 : 0);
+          assert.equal(plans, marker === "PLAN" ? 1 : 0);
+        }
+        yield* restored.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread: binding,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 7,
+            messageText: "T3-MC-FIXTURE-INTERRUPT",
+          }),
+        );
+        const runningEvent = Option.getOrThrow(
+          yield* restored.events.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+            ),
+            Stream.runHead,
+          ),
+        );
+        if (runningEvent.type !== "provider_turn.updated")
+          return yield* Effect.die("Expected running provider turn");
+        yield* waitForFixtureFile("request-INTERRUPT.started");
+        yield* restored.interruptTurn({
+          providerThread: binding,
+          providerTurnId: runningEvent.providerTurn.id,
+        });
+        const cancelled = Option.getOrThrow(
+          yield* restored.events.pipe(
+            Stream.filter((event) => event.type === "turn.terminal"),
+            Stream.runHead,
+          ),
+        );
+        if (cancelled.type !== "turn.terminal")
+          return yield* Effect.die("Expected cancellation terminal");
+        assert.equal(cancelled.status, "interrupted");
+        yield* waitForFixtureFile("interrupt-aborted");
+        yield* restored.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread: binding,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            ordinal: 8,
+            messageText: "T3-MC-FIXTURE-RESUME",
+          }),
+        );
+        const afterCancel = Option.getOrThrow(
+          yield* restored.events.pipe(
+            Stream.filter((event) => event.type === "turn.terminal"),
+            Stream.runHead,
+          ),
+        );
+        if (afterCancel.type !== "turn.terminal")
+          return yield* Effect.die("Expected recovery terminal");
+        assert.equal(afterCancel.status, "completed");
+        const concurrent = yield* Effect.all(
+          ["CONCURRENT_A", "CONCURRENT_B"].map((marker) =>
+            Effect.gen(function* () {
+              const appThreadId = ThreadId.make(`mc-real-${marker}`);
+              const session = yield* adapter.openSession({
+                threadId: appThreadId,
+                providerSessionId: ProviderSessionId.make(`mc-real-${marker}`),
+                modelSelection,
+                runtimePolicy,
+              });
+              const nativeThread = yield* session.ensureThread({
+                threadId: appThreadId,
+                modelSelection,
+                runtimePolicy,
+              });
+              yield* session.startTurn(
+                makeTurnInput({
+                  threadId: appThreadId,
+                  providerThread: nativeThread,
+                  instanceId,
+                  runtimePolicy,
+                  now: yield* DateTime.now,
+                  messageText: `T3-MC-FIXTURE-${marker}`,
+                }),
+              );
+              return { marker, session, nativeThread };
+            }),
+          ),
+          { concurrency: 2 },
+        );
+        yield* Effect.all(
+          concurrent.map(({ marker }) => waitForFixtureFile(`request-${marker}.started`)),
+          { concurrency: 2 },
+        );
+        const decodeMetadata = Schema.decodeEffect(
+          Schema.fromJsonString(Schema.Record(Schema.String, Schema.String)),
+        );
+        const metadata = yield* Effect.all(
+          concurrent.map(({ marker }) =>
+            fs
+              .readFileString(path.join(fixture, `paths-${marker}.json`))
+              .pipe(Effect.flatMap(decodeMetadata)),
+          ),
+        );
+        assert.notEqual(
+          concurrent[0]!.nativeThread.nativeThreadRef?.nativeId,
+          concurrent[1]!.nativeThread.nativeThreadRef?.nativeId,
+        );
+        for (const key of [
+          "databasePath",
+          "vectorDatabasePath",
+          "observabilityDatabasePath",
+        ] as const) {
+          assert.notEqual(metadata[0]![key], metadata[1]![key]);
+          for (const paths of metadata) {
+            const storagePath = paths[key]!;
+            const relative = path.relative(appDataDirectory, storagePath);
+            assert.isFalse(relative.startsWith("..") || path.isAbsolute(relative));
+          }
+        }
+        for (const paths of metadata) {
+          assert.equal(paths.appDataDirectory, appDataDirectory);
+          assert.equal(paths.storageBackend, "libsql");
+          assert.equal(paths.databaseUrl, `file:${paths.databasePath}`);
+          assert.isTrue(yield* fs.exists(paths.databasePath!));
+        }
+        yield* fs.writeFileString(path.join(fixture, "release-concurrent"), "release");
+        yield* Effect.all(
+          concurrent.map(({ session }) =>
+            session.events.pipe(
+              Stream.filter((event) => event.type === "turn.terminal"),
+              Stream.runHead,
+              Effect.map((terminal) => {
+                const event = Option.getOrThrow(terminal);
+                assert.equal(event.type, "turn.terminal");
+                if (event.type === "turn.terminal") assert.equal(event.status, "completed");
+              }),
+            ),
+          ),
+          { concurrency: 2 },
+        );
+        for (const args of [
+          ["init"],
+          ["config", "user.email", "fixture@example.com"],
+          ["config", "user.name", "Fixture"],
+          ["commit", "--allow-empty", "-m", "Fixture"],
+        ]) {
+          assert.equal(NodeChildProcess.spawnSync("git", args, { cwd: workspace }).status, 0);
+        }
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const socketThread = ThreadId.make("mc-native-socket-thread");
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("mc-native-socket-create"),
+            threadId: socketThread,
+            projectId: ProjectId.make("mc-native-socket-project"),
+            title: "Native MC sockets",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: workspace,
+            createdBy: "user",
+            creationSource: "web",
+          });
+          const question = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.threadId === socketThread &&
+                event.type === "runtime-request.updated" &&
+                event.payload.kind === "user_input" &&
+                event.payload.status === "pending",
+            ),
+            Stream.runHead,
+            Effect.forkChild({ startImmediately: true }),
+          );
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("mc-native-socket-send"),
+            threadId: socketThread,
+            messageId: MessageId.make("mc-native-socket-message"),
+            text: "T3-MC-FIXTURE-ASK_SOCKET",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+            dispatchMode: { type: "start_immediately" },
+          });
+          yield* worker.drain();
+          const pending = Option.getOrThrow(yield* Fiber.join(question));
+          if (pending.type !== "runtime-request.updated")
+            return yield* Effect.die("Expected native question");
+          const sockets = yield* openMastraCodeSocketFixture();
+          const clientA = yield* sockets.connect();
+          const disconnected = yield* sockets.connect();
+          const before = yield* disconnected.client[
+            ORCHESTRATION_V2_WS_METHODS.getThreadProjection
+          ]({ threadId: socketThread });
+          assert.equal(before.runtimeRequests[0]?.status, "pending");
+          const nativeId = before.providerThreads[0]?.nativeThreadRef?.nativeId;
+          assert.isString(nativeId);
+          yield* disconnected.close;
+          const clientB = yield* sockets.connect();
+          const queues = [];
+          for (const client of [clientA, clientB]) {
+            const queue = yield* Queue.unbounded<OrchestrationV2ThreadStreamItem>();
+            yield* client.client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({
+              threadId: socketThread,
+              requestCompletionMarker: true,
+            }).pipe(
+              Stream.runForEach((item) => Queue.offer(queue, item)),
+              Effect.forkIn(client.scope),
+            );
+            let sawPending = false;
+            while (true) {
+              const item = yield* Queue.take(queue);
+              if (item.kind === "snapshot")
+                sawPending = item.projection.runtimeRequests.some(
+                  (request) => request.id === pending.payload.id && request.status === "pending",
+                );
+              if (item.kind === "synchronized") break;
+            }
+            assert.isTrue(sawPending);
+            queues.push(queue);
+          }
+          const projection = yield* orchestrator.getThreadProjection(socketThread);
+          const inputItem = projection.turnItems.find((item) => item.type === "user_input_request");
+          if (inputItem?.type !== "user_input_request" || !inputItem.questions[0])
+            return yield* Effect.die("Missing native question identity");
+          const answer = {
+            type: "runtime-request.respond",
+            commandId: CommandId.make("mc-native-answer-a"),
+            threadId: socketThread,
+            requestId: pending.payload.id,
+            answers: { [inputItem.questions[0].id]: ["Blue"] },
+          } as const;
+          const second = { ...answer, commandId: CommandId.make("mc-native-answer-b") };
+          const completedRun = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.threadId === socketThread &&
+                event.type === "run.updated" &&
+                ["completed", "failed", "interrupted"].includes(event.payload.status),
+            ),
+            Stream.runHead,
+            Effect.forkChild({ startImmediately: true }),
+          );
+          // The provider finishes asynchronously after the answer effect. Keep
+          // consuming newly queued finalization/checkpoint effects as production
+          // does; a single drain can finish before those effects are enqueued.
+          yield* EffectWorker.runDaemon.pipe(Effect.forkChild({ startImmediately: true }));
+          const raced = yield* Effect.all(
+            [
+              clientA.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](answer).pipe(
+                Effect.result,
+              ),
+              clientB.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](second).pipe(
+                Effect.result,
+              ),
+            ],
+            { concurrency: 2 },
+          );
+          const winner = raced.find((result) => result._tag === "Success");
+          const loser = raced.find((result) => result._tag === "Failure");
+          if (winner?._tag !== "Success" || loser?._tag !== "Failure")
+            return yield* Effect.die("Expected one accepted native answer");
+          assert.isTrue(Schema.is(OrchestrationV2DispatchCommandError)(loser.failure));
+          if (!Schema.is(OrchestrationV2DispatchCommandError)(loser.failure))
+            return yield* Effect.die("Unexpected socket failure");
+          assert.equal(loser.failure.message, `Runtime request ${pending.payload.id} is resolved.`);
+          assert.equal(loser.failure.commandType, "runtime-request.respond");
+          assert.equal(
+            loser.failure.commandId,
+            raced[0]?._tag === "Failure" ? answer.commandId : second.commandId,
+          );
+          const retry = yield* clientB.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](
+            raced[0]?._tag === "Success" ? answer : second,
+          );
+          assert.equal(retry.sequence, winner.success.sequence);
+          yield* worker.drain();
+          const completedEvent = Option.getOrThrow(
+            yield* Fiber.join(completedRun).pipe(Effect.timeout("20 seconds")),
+          );
+          if (completedEvent.type !== "run.updated")
+            return yield* Effect.die("Expected terminal durable run");
+          assert.equal(completedEvent.payload.status, "completed");
+          yield* waitForFixtureFile("socket-ask-continuation-2.json");
+          for (const queue of queues) {
+            while (true) {
+              const item = yield* Queue.take(queue);
+              if (
+                item.kind === "event" &&
+                item.event.type === "runtime-request.updated" &&
+                item.event.payload.id === pending.payload.id &&
+                item.event.payload.status === "resolved"
+              )
+                break;
+            }
+          }
+          yield* clientB.close;
+          const reconnected = yield* sockets.connect();
+          const after = yield* reconnected.client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({
+            threadId: socketThread,
+          });
+          assert.equal(after.runtimeRequests[0]?.status, "resolved");
+          assert.equal(after.providerThreads[0]?.nativeThreadRef?.nativeId, nativeId);
+          const finalReplay = yield* reconnected.client[
+            ORCHESTRATION_V2_WS_METHODS.subscribeThread
+          ]({
+            threadId: socketThread,
+            requestCompletionMarker: true,
+          }).pipe(
+            Stream.takeUntil((item) => item.kind === "synchronized"),
+            Stream.runCollect,
+          );
+          assert.isTrue(
+            finalReplay.some(
+              (item) =>
+                item.kind === "snapshot" &&
+                item.projection.runtimeRequests.some(
+                  (request) => request.id === pending.payload.id && request.status === "resolved",
+                ),
+            ),
+          );
+          assert.isTrue(finalReplay.some((item) => item.kind === "synchronized"));
+          const continuation = yield* Schema.decodeEffect(
+            Schema.fromJsonString(
+              Schema.Struct({
+                callId: Schema.String,
+                outputs: Schema.Array(
+                  Schema.Struct({
+                    type: Schema.String,
+                    call_id: Schema.String,
+                    output: Schema.String,
+                  }),
+                ),
+              }),
+            ),
+          )(yield* fs.readFileString(path.join(fixture, "socket-ask-continuation-2.json")));
+          assert.lengthOf(continuation.outputs, 1);
+          assert.equal(continuation.outputs[0]?.type, "function_call_output");
+          assert.equal(continuation.outputs[0]?.call_id, continuation.callId);
+          assert.include(continuation.outputs[0]!.output, "Blue");
+          assert.isFalse(yield* fs.exists(path.join(fixture, "socket-ask-continuation-3.json")));
+        }).pipe(
+          Effect.provide(
+            ProviderReplayHarness.layerWithRegistry(
+              { name: "mc-native-two-client", runtimePolicyOverride: { cwd: workspace } },
+              ProviderAdapterRegistry.layerSingle(adapter),
+              { runEffectWorker: false },
+            ),
+          ),
+        );
+        assert.isFalse(yield* fs.exists(path.join(fixture, "unexpected-network")));
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+    { timeout: 120_000 },
+  );
+
+  it.live.each([
+    { exposesModels: true, initialPlan: false },
+    { exposesModels: true, initialPlan: true },
+    { exposesModels: false, initialPlan: false },
+    { exposesModels: false, initialPlan: true },
+  ])(
+    "negotiates MC single-model switching only with advertised models ($exposesModels, initialPlan=$initialPlan)",
+    ({ exposesModels, initialPlan }) =>
+      Effect.gen(function* () {
+        const modelCalls: string[] = [];
+        const promptModels: string[] = [];
+        let nativeMode = "build";
+        let nativeModel = "model-a";
+        const path = yield* Path.Path;
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const instanceId = ProviderInstanceId.make("mc-legacy-models");
+        const adapter = makeAcpAdapterV2({
+          crypto: yield* Crypto.Crypto,
+          instanceId,
+          fileSystem: yield* FileSystem.FileSystem,
+          idAllocator: yield* IdAllocator.IdAllocatorV2,
+          serverConfig: yield* ServerConfig.ServerConfig,
+          selfInvocation: yield* resolveSelfInvocation(),
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: {
+              ...AcpProviderCapabilitiesV2,
+              sessions: {
+                ...AcpProviderCapabilitiesV2.sessions,
+                supportsModelSwitchInSession: true,
+              },
+            },
+            applyModelSelection: (input) =>
+              applyMastraCodeModelSelection({
+                ...input,
+                models: ["model-a", "model-b"].map((slug) => ({
+                  slug,
+                  name: slug,
+                  isCustom: false,
+                  capabilities: null,
+                })),
+              }),
+            sessionModeForPolicy: (policy) =>
+              policy.interactionMode === "plan" ? "plan" : "build",
+            makeRuntime: makeMockRuntime({
+              childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+              mockAgentPath,
+              wrapRuntime: (runtime) => ({
+                ...runtime,
+                setMode: (modeId) =>
+                  Effect.sync(() => {
+                    nativeMode = modeId;
+                    return {};
+                  }),
+                getModeState: Effect.sync(() => ({
+                  currentModeId: nativeMode,
+                  availableModes: ["build", "plan"].map((id) => ({ id, name: id })),
+                })),
+                getConfigOptions: runtime.getConfigOptions.pipe(
+                  Effect.map((options) => options.filter((option) => option.category !== "mode")),
+                ),
+                setSessionModel: (modelId) =>
+                  Effect.sync(() => {
+                    modelCalls.push(`${nativeMode}:${modelId}`);
+                    nativeModel = modelId;
+                    return {};
+                  }),
+                prompt: (payload, options) =>
+                  Effect.sync(() => {
+                    promptModels.push(`${nativeMode}:${nativeModel}`);
+                  }).pipe(Effect.andThen(runtime.prompt(payload, options))),
+                start: () =>
+                  runtime.start().pipe(
+                    Effect.map((started) => ({
+                      ...started,
+                      sessionSetupResult: {
+                        sessionId: started.sessionId,
+                        ...(exposesModels
+                          ? {
+                              models: {
+                                currentModelId: "model-a",
+                                availableModels: ["model-a", "model-b"].map((modelId) => ({
+                                  modelId,
+                                  name: modelId,
+                                })),
+                              },
+                            }
+                          : {}),
+                      },
+                    })),
+                  ),
+              }),
+            }),
+          },
+        });
+        const threadId = ThreadId.make("mc-legacy-models");
+        const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("mc-legacy-models"),
+          modelSelection: { instanceId, model: "default" },
+          runtimePolicy: initialPlan
+            ? { ...runtimePolicy, interactionMode: "plan" }
+            : runtimePolicy,
+        });
+        assert.equal(
+          runtime.providerSession.capabilities.sessions.supportsModelSwitchInSession,
+          exposesModels,
+        );
+        if (exposesModels) {
+          const providerThread = yield* runtime.ensureThread({
+            threadId,
+            runtimePolicy,
+            modelSelection: { instanceId, model: "model-a" },
+          });
+          for (const model of ["model-b", "default", "model-a"]) {
+            const turnPolicy =
+              model === "model-b"
+                ? { ...runtimePolicy, interactionMode: "plan" as const }
+                : runtimePolicy;
+            yield* runtime.startTurn(
+              makeTurnInput({
+                threadId,
+                providerThread,
+                instanceId,
+                runtimePolicy: turnPolicy,
+                now: yield* DateTime.now,
+                modelSelection: { instanceId, model },
+              }),
+            );
+            yield* runtime.events.pipe(
+              Stream.filter((event) => event.type === "turn.terminal"),
+              Stream.runHead,
+            );
+          }
+          // ensureThread adopts identity; the explicit turn model is applied
+          // by startTurn, not by the preceding identity-only ensure call.
+          assert.deepEqual(modelCalls, ["plan:model-b", "build:model-a"]);
+          assert.deepEqual(promptModels, ["plan:model-b", "build:model-b", "build:model-a"]);
+          assert.equal(nativeMode, "build");
+        } else {
+          assert.deepEqual(modelCalls, []);
+        }
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
   it.effect("negotiates and executes optional native session forks through the ACP runtime", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -2155,7 +3236,7 @@ describe("AcpAdapterV2", () => {
         { requestId: "test-terminal-output", method: "terminal/output" },
       );
       assert.equal(terminalOutput.output, "Bearer target-thread-token");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -2254,7 +3335,7 @@ describe("AcpAdapterV2", () => {
           { method: "fs/read_text_file", errorCode: -32601 },
         ]);
         assert.isFalse(yield* fileSystem.exists(probePath));
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("does not turn an unknown permission approval into an execute grant", () =>
@@ -2391,7 +3472,7 @@ describe("AcpAdapterV2", () => {
         providerTurnId: pending.runtimeRequest.providerTurnId,
       });
       yield* Fiber.join(turnFiber);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("fails missing native ACP session ids through the typed start-turn error channel", () =>
@@ -2453,7 +3534,7 @@ describe("AcpAdapterV2", () => {
       assert.equal(error._tag, "ProviderAdapterTurnStartError");
       assert.instanceOf(error.cause, ProviderAdapterProtocolError);
       assert.include(String(error.cause), "missing its ACP session id");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("replaces the ACP session and clears conversation state on rollback", () =>
@@ -2620,7 +3701,7 @@ describe("AcpAdapterV2", () => {
         }
       }
       assert.equal(secondStatus, "completed");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("quarantines callbacks from a failed rollback replacement before retrying", () =>
@@ -2642,6 +3723,7 @@ describe("AcpAdapterV2", () => {
         AcpAdapterV2ExtensionContext["applyBackgroundTaskMutation"] | undefined
       > = [];
       const availableCommandUpdates: Array<ReadonlyArray<EffectAcpSchema.AvailableCommand>> = [];
+      const availableCommandWorkspaces: string[] = [];
       let registeredExtensionOrdinal = 0;
       let runtimeOrdinalSeen = 0;
       const makeRuntime = makeMockRuntime({
@@ -2699,9 +3781,10 @@ describe("AcpAdapterV2", () => {
           driver: ACP_TEST_DRIVER,
           capabilities: AcpProviderCapabilitiesV2,
           enablePostSettleContinuation: true,
-          onAvailableCommandsUpdate: (commands) =>
+          onAvailableCommandsUpdate: (commands, cwd) =>
             Effect.sync(() => {
               availableCommandUpdates.push(commands);
+              availableCommandWorkspaces.push(cwd);
             }),
           registerExtensions: (context) =>
             Effect.sync(() => {
@@ -2760,6 +3843,7 @@ describe("AcpAdapterV2", () => {
         availableCommandUpdates.map((commands) => commands.map((command) => command.name)),
         [["staged-command"]],
       );
+      assert.deepEqual(availableCommandWorkspaces, [runtimePolicy.cwd]);
       const failedReplacementHandler = sessionUpdateHandlers[1];
       const failedBackgroundMutationHandler = backgroundMutationHandlers[1];
       assert.isDefined(failedReplacementHandler);
@@ -2781,7 +3865,7 @@ describe("AcpAdapterV2", () => {
         status: "running",
       });
       assert.isFalse(yield* hasPendingBackgroundWork);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("keeps the original ACP session usable when a staged replacement terminates", () =>
@@ -2897,7 +3981,7 @@ describe("AcpAdapterV2", () => {
           break;
         }
       }
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("closes an idle ACP session exactly once through the transition permit", () =>
@@ -2946,7 +4030,7 @@ describe("AcpAdapterV2", () => {
       yield* Scope.close(sessionScope, Exit.void);
       const finalizerMethods = yield* pollProtocolMethods(protocolEvents);
       assert.equal(finalizerMethods.filter((method) => method === "session/close").length, 1);
-    }).pipe(Effect.provide(testLayer)),
+    }).pipe(Effect.provide(layerTest)),
   );
 
   it.effect.each(["grok-build", "composer-2"])(
@@ -3003,7 +4087,7 @@ describe("AcpAdapterV2", () => {
           ).length,
           model === "grok-build" ? 0 : 1,
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("Grok reapplies an explicit return to the session's setup-time model", () =>
@@ -3084,7 +4168,7 @@ describe("AcpAdapterV2", () => {
         ).length,
         3,
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("skips requested options that the active ACP session does not expose", () =>
@@ -3133,7 +4217,7 @@ describe("AcpAdapterV2", () => {
       });
 
       assert.equal(runtime.providerSession.status, "ready");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("reconfigures a loaded ACP session from its own active setup metadata", () =>
@@ -3244,7 +4328,7 @@ describe("AcpAdapterV2", () => {
           rawProtocolRequestParam(event, "configId") === "model",
       );
       assert.lengthOf(modelConfigurationRequests, 2);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("terminalizes an empty successful foreground Bash tool when the turn completes", () =>
@@ -3391,7 +4475,7 @@ describe("AcpAdapterV2", () => {
         Stream.runHead,
       );
       assert.isTrue(Option.isSome(loadAfterRestart));
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("drains native ACP cancellation before admitting the next prompt", () =>
@@ -3505,10 +4589,19 @@ describe("AcpAdapterV2", () => {
         ),
       );
       assert.equal(nextTerminal.type === "turn.terminal" && nextTerminal.status, "completed");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
-  it.effect("cancels pending permission requests while interrupting an ACP turn", () =>
+  it.effect.each([
+    {
+      latePreparation: false,
+      name: "cancels pending permission requests while interrupting an ACP turn",
+    },
+    {
+      latePreparation: true,
+      name: "does not admit a late prepared plan after interrupting an ACP turn",
+    },
+  ])("$name", ({ latePreparation }) =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -3520,6 +4613,10 @@ describe("AcpAdapterV2", () => {
         new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
       );
       const releaseCancel = yield* Deferred.make<void>();
+      const cancelEntered = yield* Deferred.make<void>();
+      const preparationEntered = yield* Deferred.make<void>();
+      const releasePreparation = yield* Deferred.make<void>();
+      const responseWritten = yield* Deferred.make<void>();
       const instanceId = ProviderInstanceId.make("acp-test");
       const adapter = makeAcpAdapterV2({
         crypto: yield* Crypto.Crypto,
@@ -3527,11 +4624,28 @@ describe("AcpAdapterV2", () => {
         flavor: {
           driver: ACP_TEST_DRIVER,
           capabilities: AcpProviderCapabilitiesV2,
+          preparePermissionRequest: ({ threadId, runtimePolicy }) => {
+            assert.equal(threadId, ThreadId.make("thread-acp-cancel-permission"));
+            assert.equal(runtimePolicy.cwd, process.cwd());
+            return Effect.gen(function* () {
+              yield* Deferred.succeed(preparationEntered, undefined);
+              if (latePreparation) yield* Deferred.await(releasePreparation);
+              return { proposedPlanMarkdown: "# Prepared native plan" };
+            });
+          },
           makeRuntime: makeMockRuntime({
             childProcessSpawner,
             mockAgentPath,
             environment: { T3_ACP_EMIT_TOOL_CALLS: "1" },
-            wrapCancel: (cancel) => Deferred.await(releaseCancel).pipe(Effect.andThen(cancel)),
+            wrapCancel: (cancel) =>
+              Deferred.succeed(cancelEntered, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseCancel)),
+                Effect.andThen(cancel),
+              ),
+            wrapOutgoingResponse: (onOutgoingResponse) => (requestId) =>
+              onOutgoingResponse(requestId).pipe(
+                Effect.andThen(Deferred.succeed(responseWritten, undefined)),
+              ),
           }),
         },
         fileSystem,
@@ -3562,15 +4676,65 @@ describe("AcpAdapterV2", () => {
         makeTurnInput({ threadId, providerThread, instanceId, runtimePolicy, now }),
       );
 
-      const pendingRequest = Option.getOrThrow(
-        yield* runtime.events.pipe(
-          Stream.filter(
+      if (latePreparation) {
+        yield* Deferred.await(preparationEntered);
+        const running = Option.getOrThrow(
+          yield* runtime.events.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+            ),
+            Stream.runHead,
+          ),
+        );
+        if (running.type !== "provider_turn.updated")
+          return yield* Effect.die("Expected a running provider turn");
+        const interruptFiber = yield* runtime
+          .interruptTurn({
+            providerThread,
+            providerTurnId: running.providerTurn.id,
+          })
+          .pipe(Effect.forkScoped);
+        yield* Deferred.await(cancelEntered);
+        yield* Deferred.succeed(releasePreparation, undefined);
+        yield* Deferred.await(responseWritten);
+        yield* Deferred.succeed(releaseCancel, undefined);
+        yield* Fiber.join(interruptFiber);
+        const events = Array.from(
+          yield* runtime.events.pipe(
+            Stream.takeUntil((event) => event.type === "turn.terminal"),
+            Stream.runCollect,
+          ),
+        );
+        assert.isFalse(events.some((event) => event.type === "plan.updated"));
+        assert.isFalse(
+          events.some(
             (event) =>
               event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
           ),
-          Stream.runHead,
+        );
+        const terminal = events.at(-1);
+        assert.equal(terminal?.type === "turn.terminal" && terminal.status, "interrupted");
+        return;
+      }
+
+      const admissionEvents = Array.from(
+        yield* runtime.events.pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+          ),
+          Stream.runCollect,
         ),
       );
+      const planIndex = admissionEvents.findIndex((event) => event.type === "plan.updated");
+      const pendingIndex = admissionEvents.findIndex(
+        (event) =>
+          event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+      );
+      assert.isAtLeast(planIndex, 0);
+      assert.isBelow(planIndex, pendingIndex);
+      const pendingRequest = admissionEvents[pendingIndex]!;
       if (
         pendingRequest.type !== "runtime_request.updated" ||
         pendingRequest.runtimeRequest.providerTurnId === null
@@ -3606,9 +4770,8 @@ describe("AcpAdapterV2", () => {
         ),
       );
       assert.equal(terminal.type, "turn.terminal");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
-
   it.live("keeps hard teardown excluded until a permission response is enqueued", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -3705,10 +4868,414 @@ describe("AcpAdapterV2", () => {
       yield* Deferred.succeed(releaseResponseAcknowledgement, undefined);
       yield* Fiber.join(responseFiber);
       yield* Fiber.join(interruptFiber);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
-  it.live("carries elicitation request identity through the completed stdout write", () =>
+  it.live(
+    "delivers admitted MC answers through durable dispatch and rejects unpublished overload",
+    () =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped();
+        const capacityRejected = yield* Deferred.make<void>();
+        for (const args of [
+          ["init"],
+          ["config", "user.email", "fixture@example.com"],
+          ["config", "user.name", "Fixture"],
+          ["commit", "--allow-empty", "-m", "Fixture"],
+        ]) {
+          assert.equal(NodeChildProcess.spawnSync("git", args, { cwd: root }).status, 0);
+        }
+        const validationEntered = yield* Deferred.make<void>();
+        const releaseValidation = yield* Deferred.make<void>();
+        const responseWritten = yield* Deferred.make<void>();
+        const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
+        const workerSpawner = ChildProcessSpawner.make((command) => {
+          if (
+            command._tag !== "StandardCommand" ||
+            !command.args.some((arg) => arg.includes("mastra-elicitation-worker"))
+          ) {
+            return childProcessSpawner.spawn(command);
+          }
+          return Effect.gen(function* () {
+            yield* Deferred.succeed(validationEntered, undefined);
+            return ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(1),
+              exitCode: Deferred.await(releaseValidation).pipe(
+                Effect.as(ChildProcessSpawner.ExitCode(0)),
+              ),
+              isRunning: Effect.succeed(true),
+              kill: () => Effect.void,
+              unref: Effect.succeed(Effect.void),
+              stdin: Sink.drain,
+              stdout: Stream.encodeText(Stream.make("true")),
+              stderr: Stream.empty,
+              all: Stream.empty,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
+            });
+          });
+        });
+        const instanceId = ProviderInstanceId.make("mc-durable-form");
+        const mockAgentPath = yield* path.fromFileUrl(
+          new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+        );
+        const mockRuntime = makeMockRuntime({
+          childProcessSpawner,
+          mockAgentPath,
+          environment: { T3_ACP_EMIT_ELICITATION: "1", T3_ACP_ELICITATION_STRING: "1" },
+          protocolEvents,
+          wrapRuntime: (runtime) => ({ ...runtime, setMode: () => Effect.succeed({}) }),
+          wrapOutgoingResponse: (callback) => (requestId) =>
+            callback(requestId).pipe(
+              Effect.andThen(
+                Effect.gen(function* () {
+                  if (yield* Deferred.isDone(validationEntered)) {
+                    yield* Deferred.succeed(responseWritten, undefined);
+                  }
+                }),
+              ),
+            ),
+        });
+        const adapter = makeAcpAdapterV2({
+          instanceId,
+          crypto: yield* Crypto.Crypto,
+          fileSystem,
+          idAllocator: yield* IdAllocator.IdAllocatorV2,
+          serverConfig: yield* ServerConfig.ServerConfig,
+          selfInvocation: yield* resolveSelfInvocation(),
+          flavor: {
+            driver: ProviderDriverKind.make("mastraCode"),
+            capabilities: AcpProviderCapabilitiesV2,
+            acquireFormElicitation: () =>
+              acquireMastraCodeFormAdmission().pipe(
+                Effect.tapError(() => Deferred.succeed(capacityRejected, undefined)),
+              ),
+            prepareFormElicitation: (input) =>
+              prepareMastraCodeForm(input, (property, answer) =>
+                answer === ""
+                  ? Effect.succeed(false)
+                  : validateMastraCodeStringConstraints(property, answer).pipe(
+                      Effect.provideService(Path.Path, path),
+                      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, workerSpawner),
+                    ),
+              ),
+            makeRuntime: mockRuntime,
+          },
+        });
+        // Canonical durable runtime + the production MC form hooks; only the
+        // external ACP subprocess and constraint worker are controlled fixtures.
+        const leases = yield* Effect.all(
+          Array.from({ length: 32 }, () => acquireMastraCodeFormAdmission()),
+        );
+        try {
+          yield* Effect.gen(function* () {
+            const orchestrator = yield* Orchestrator.OrchestratorV2;
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const modelSelection = { instanceId, model: "default" } as const;
+            const create = (threadId: ThreadId) =>
+              orchestrator.dispatch({
+                type: "thread.create",
+                commandId: CommandId.make(`create-${threadId}`),
+                threadId,
+                projectId: ProjectId.make("mc-form-project"),
+                title: "MC form",
+                modelSelection,
+                runtimeMode: "full-access",
+                interactionMode: "default",
+                branch: null,
+                worktreePath: root,
+                createdBy: "user",
+                creationSource: "web",
+              });
+            const send = (threadId: ThreadId) =>
+              orchestrator.dispatch({
+                type: "message.dispatch",
+                commandId: CommandId.make(`send-${threadId}`),
+                threadId,
+                messageId: MessageId.make(`message-${threadId}`),
+                text: "Ask",
+                attachments: [],
+                createdBy: "user",
+                creationSource: "web",
+                dispatchMode: { type: "start_immediately" },
+              });
+            const rejectedId = ThreadId.make("mc-capacity-rejected");
+            yield* create(rejectedId);
+            const failed = yield* orchestrator.streamDomainEvents.pipe(
+              Stream.filter(
+                (event) =>
+                  event.threadId === rejectedId &&
+                  event.type === "run.updated" &&
+                  event.payload.status === "failed",
+              ),
+              Stream.runHead,
+              Effect.forkChild({ startImmediately: true }),
+            );
+            yield* send(rejectedId);
+            yield* worker.drain();
+            yield* Fiber.join(failed);
+            assert.lengthOf(
+              (yield* orchestrator.getThreadProjection(rejectedId)).runtimeRequests,
+              0,
+            );
+            const rejectedWrites = Array.from(yield* Queue.takeAll(protocolEvents))
+              .flatMap((event) =>
+                event.direction === "outgoing" &&
+                event.stage === "raw" &&
+                typeof event.payload === "string"
+                  ? [event.payload]
+                  : [],
+              )
+              .join("\n");
+            assert.isTrue(yield* Deferred.isDone(capacityRejected));
+            const nativeErrors = rejectedWrites.split("\n").flatMap((line) => {
+              const record = Option.getOrUndefined(decodeUnknownJson(line));
+              return typeof record === "object" && record !== null && "error" in record
+                ? [record]
+                : [];
+            });
+            assert.lengthOf(nativeErrors, 1);
+            yield* leases[0]!;
+            const threadId = ThreadId.make("mc-capacity-admitted");
+            yield* create(threadId);
+            const question = yield* orchestrator.streamDomainEvents.pipe(
+              Stream.filter(
+                (event) =>
+                  event.threadId === threadId &&
+                  event.type === "runtime-request.updated" &&
+                  event.payload.status === "pending",
+              ),
+              Stream.runHead,
+              Effect.forkChild({ startImmediately: true }),
+            );
+            yield* send(threadId);
+            yield* worker.drain();
+            const pending = Option.getOrThrow(yield* Fiber.join(question));
+            if (pending.type !== "runtime-request.updated")
+              return yield* Effect.die("Expected durable question");
+            const sockets = yield* openMastraCodeSocketFixture();
+            const firstClient = yield* sockets.connect();
+            const disconnectedClient = yield* sockets.connect();
+            for (const client of [firstClient, disconnectedClient]) {
+              const snapshot = yield* client.client[
+                ORCHESTRATION_V2_WS_METHODS.getThreadProjection
+              ]({ threadId });
+              assert.equal(snapshot.runtimeRequests[0]?.id, pending.payload.id);
+              assert.equal(snapshot.runtimeRequests[0]?.status, "pending");
+            }
+            yield* disconnectedClient.close;
+            const secondClient = yield* sockets.connect();
+            assert.equal(
+              (yield* secondClient.client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({
+                threadId,
+              })).runtimeRequests[0]?.status,
+              "pending",
+            );
+            const subscriptionQueues = [];
+            const subscriptionCursors: number[] = [];
+            for (const client of [firstClient, secondClient]) {
+              const queue = yield* Queue.unbounded<OrchestrationV2ThreadStreamItem>();
+              yield* client.client[ORCHESTRATION_V2_WS_METHODS.subscribeThread]({
+                threadId,
+                requestCompletionMarker: true,
+              }).pipe(
+                Stream.runForEach((item) => Queue.offer(queue, item)),
+                Effect.forkIn(client.scope),
+              );
+              let sawPending = false;
+              while (true) {
+                const item = yield* Queue.take(queue);
+                if (item.kind === "snapshot") {
+                  sawPending = item.projection.runtimeRequests.some(
+                    (request) => request.id === pending.payload.id && request.status === "pending",
+                  );
+                  subscriptionCursors.push(item.snapshotSequence);
+                }
+                if (item.kind === "synchronized") break;
+              }
+              assert.isTrue(sawPending);
+              subscriptionQueues.push(queue);
+            }
+            const answer = {
+              type: "runtime-request.respond",
+              commandId: CommandId.make("answer-mc-form"),
+              threadId,
+              requestId: pending.payload.id,
+              answers: { approved: ["owner@example.com"], secondEmail: ["second@example.com"] },
+            } as const;
+            const invalidAnswer = {
+              ...answer,
+              commandId: CommandId.make("answer-mc-form-invalid"),
+              answers: {},
+            };
+            const invalid = yield* firstClient.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](
+              invalidAnswer,
+            ).pipe(Effect.result);
+            assert.equal(invalid._tag, "Failure");
+            const invalidRetry = yield* secondClient.client[
+              ORCHESTRATION_V2_WS_METHODS.dispatchCommand
+            ](invalidAnswer).pipe(Effect.result);
+            assert.equal(invalidRetry._tag, "Failure");
+            const stillPending = yield* orchestrator.getThreadProjection(threadId);
+            assert.equal(stillPending.runtimeRequests[0]?.status, "pending");
+            assert.equal(
+              stillPending.turnItems.find((item) => item.type === "user_input_request")?.status,
+              "waiting",
+            );
+            assert.isFalse(yield* Deferred.isDone(responseWritten));
+            const race = yield* Effect.all(
+              [
+                firstClient.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](answer).pipe(
+                  Effect.result,
+                ),
+                secondClient.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({
+                  ...answer,
+                  commandId: CommandId.make("answer-mc-form-second-client"),
+                }).pipe(Effect.result),
+              ],
+              { concurrency: "unbounded" },
+            ).pipe(Effect.forkChild);
+            yield* Deferred.await(validationEntered);
+            assert.isFalse(yield* Deferred.isDone(responseWritten));
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).runtimeRequests[0]?.status,
+              "pending",
+            );
+            yield* Deferred.succeed(releaseValidation, undefined);
+            const raced = yield* Fiber.join(race);
+            assert.equal(raced.filter((result) => result._tag === "Success").length, 1);
+            assert.equal(raced.filter((result) => result._tag === "Failure").length, 1);
+            const loser = raced.find((result) => result._tag === "Failure");
+            const winner = raced.find((result) => result._tag === "Success");
+            if (loser?._tag !== "Failure" || winner?._tag !== "Success")
+              return yield* Effect.die("Expected one committed answer and one rejection");
+            assert.isTrue(Schema.is(OrchestrationV2DispatchCommandError)(loser.failure));
+            if (!Schema.is(OrchestrationV2DispatchCommandError)(loser.failure))
+              return yield* Effect.die("Unexpected transport failure");
+            assert.equal(loser.failure.commandType, "runtime-request.respond");
+            assert.equal(
+              loser.failure.commandId,
+              raced[0]?._tag === "Failure" ? answer.commandId : "answer-mc-form-second-client",
+            );
+            assert.equal(
+              loser.failure.message,
+              `Runtime request ${pending.payload.id} is resolved.`,
+            );
+            const winningCommand =
+              raced[0]?._tag === "Success"
+                ? answer
+                : { ...answer, commandId: CommandId.make("answer-mc-form-second-client") };
+            // Retrying the committed command after a reconnect must return its
+            // original receipt, not emit a second native response.
+            const retry =
+              yield* secondClient.client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand](
+                winningCommand,
+              );
+            assert.equal(retry.sequence, winner.success.sequence);
+            const drain = yield* worker.drain().pipe(Effect.forkChild);
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).runtimeRequests[0]?.status,
+              "resolved",
+            );
+            yield* Deferred.await(responseWritten);
+            yield* Fiber.join(drain);
+            for (const queue of subscriptionQueues) {
+              while (true) {
+                const item = yield* Queue.take(queue);
+                if (
+                  item.kind === "event" &&
+                  item.event.type === "runtime-request.updated" &&
+                  item.event.payload.id === pending.payload.id &&
+                  item.event.payload.status === "resolved"
+                )
+                  break;
+              }
+            }
+            for (const client of [firstClient, secondClient]) {
+              const resolved = yield* client.client[
+                ORCHESTRATION_V2_WS_METHODS.getThreadProjection
+              ]({ threadId });
+              assert.lengthOf(resolved.runtimeRequests, 1);
+              assert.equal(resolved.runtimeRequests[0]?.status, "resolved");
+            }
+            const resumeCursor = subscriptionCursors[1];
+            if (resumeCursor === undefined)
+              return yield* Effect.die("Missing saved subscription cursor");
+            yield* secondClient.close;
+            const resumedClient = yield* sockets.connect();
+            const replay = yield* resumedClient.client[ORCHESTRATION_V2_WS_METHODS.subscribeThread](
+              {
+                threadId,
+                afterSequence: resumeCursor,
+                requestCompletionMarker: true,
+              },
+            ).pipe(
+              Stream.takeUntil((item) => item.kind === "synchronized"),
+              Stream.runCollect,
+            );
+            assert.isFalse(replay.some((item) => item.kind === "snapshot"));
+            const resolvedReplay = replay.filter(
+              (item) =>
+                item.kind === "event" &&
+                item.event.type === "runtime-request.updated" &&
+                item.event.payload.id === pending.payload.id &&
+                item.event.payload.status === "resolved",
+            );
+            assert.lengthOf(resolvedReplay, 1);
+            for (const item of replay)
+              if (item.kind === "event") assert.isAbove(item.sequence, resumeCursor);
+            const writes = Array.from(yield* Queue.takeAll(protocolEvents))
+              .flatMap((event) =>
+                event.direction === "outgoing" &&
+                event.stage === "raw" &&
+                typeof event.payload === "string"
+                  ? [event.payload]
+                  : [],
+              )
+              .join("\n");
+            const nativeAnswers: ReadonlyArray<unknown> = writes.split("\n").flatMap((line) => {
+              const record = Option.getOrUndefined(decodeUnknownJson(line));
+              if (typeof record !== "object" || record === null || !("result" in record)) return [];
+              const result = record.result;
+              return typeof result === "object" && result !== null && "action" in result
+                ? [result]
+                : [];
+            });
+            assert.deepEqual(nativeAnswers, [
+              {
+                action: "accept",
+                content: { approved: "owner@example.com", secondEmail: "second@example.com" },
+              },
+            ]);
+            assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runtimeRequests, 1);
+          }).pipe(
+            Effect.provide(
+              ProviderReplayHarness.layerWithRegistry(
+                { name: "mc-durable-admission", runtimePolicyOverride: { cwd: root } },
+                ProviderAdapterRegistry.layerSingle(adapter),
+                { runEffectWorker: false },
+              ),
+            ),
+          );
+        } finally {
+          yield* Effect.all(leases);
+        }
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.live.each([
+    {
+      interruptDuringValidation: false,
+      name: "carries elicitation request identity through the completed stdout write",
+    },
+    {
+      interruptDuringValidation: true,
+      name: "drains admitted form validation before interrupting the turn",
+    },
+  ])("$name", ({ interruptDuringValidation }) =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const fileSystem = yield* FileSystem.FileSystem;
@@ -3721,6 +5288,11 @@ describe("AcpAdapterV2", () => {
       );
       const responseWritten = yield* Deferred.make<void>();
       const releaseResponseAcknowledgement = yield* Deferred.make<void>();
+      const validationEntered = yield* Deferred.make<void>();
+      const releaseValidation = yield* Deferred.make<void>();
+      const formLeaseReleased = yield* Deferred.make<void>();
+      const cancelEntered = yield* Deferred.make<void>();
+      const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
       const instanceId = ProviderInstanceId.make("acp-test-reordered-elicitation");
       const adapter = makeAcpAdapterV2({
         crypto: yield* Crypto.Crypto,
@@ -3728,10 +5300,44 @@ describe("AcpAdapterV2", () => {
         flavor: {
           driver: ACP_TEST_DRIVER,
           capabilities: AcpProviderCapabilitiesV2,
+          acquireFormElicitation: () =>
+            Effect.succeed(Deferred.succeed(formLeaseReleased, undefined).pipe(Effect.asVoid)),
+          prepareFormElicitation: ({ threadId }) => {
+            assert.equal(threadId, ThreadId.make("thread-acp-reordered-elicitation"));
+            return Effect.succeed({
+              questions: [
+                {
+                  id: "approved",
+                  header: "Confirmation",
+                  question: "Enter the confirmation text",
+                  options: [],
+                  allowCustomAnswer: true,
+                  answerFormat: "raw-string",
+                },
+              ],
+              respond: (answers) =>
+                Effect.gen(function* () {
+                  yield* Deferred.succeed(validationEntered, undefined);
+                  yield* Deferred.await(releaseValidation);
+                  return answers === null
+                    ? { action: "cancel" as const }
+                    : {
+                        action: "accept" as const,
+                        content: {
+                          approved:
+                            Array.isArray(answers.approved) && answers.approved[0] === "true",
+                        },
+                      };
+                }),
+            });
+          },
           makeRuntime: makeMockRuntime({
             childProcessSpawner,
             mockAgentPath,
             environment: { T3_ACP_EMIT_ELICITATION: "1" },
+            protocolEvents,
+            wrapCancel: (cancel) =>
+              Deferred.succeed(cancelEntered, undefined).pipe(Effect.andThen(cancel)),
             wrapOutgoingResponse: (onOutgoingResponse) => (requestId) =>
               Deferred.succeed(responseWritten, undefined).pipe(
                 Effect.andThen(Deferred.await(releaseResponseAcknowledgement)),
@@ -3790,13 +5396,51 @@ describe("AcpAdapterV2", () => {
         })
         .pipe(Effect.forkScoped);
 
+      yield* Deferred.await(validationEntered);
+      assert.isUndefined(responseFiber.pollUnsafe());
+      assert.isFalse(yield* Deferred.isDone(responseWritten));
+      assert.isFalse(yield* Deferred.isDone(formLeaseReleased));
+      const interruptFiber = interruptDuringValidation
+        ? yield* runtime
+            .interruptTurn({
+              providerThread,
+              providerTurnId: pending.runtimeRequest.providerTurnId!,
+              requestRuntimeRestart: false,
+            })
+            .pipe(Effect.forkScoped)
+        : undefined;
+      if (interruptDuringValidation) {
+        yield* Effect.yieldNow;
+        assert.isFalse(yield* Deferred.isDone(cancelEntered));
+        assert.isUndefined(interruptFiber!.pollUnsafe());
+      }
+      yield* Deferred.succeed(releaseValidation, undefined);
       yield* Deferred.await(responseWritten);
       assert.isUndefined(responseFiber.pollUnsafe());
+      assert.isFalse(yield* Deferred.isDone(formLeaseReleased));
       yield* Deferred.succeed(releaseResponseAcknowledgement, undefined);
       yield* Fiber.join(responseFiber);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+      yield* Deferred.await(formLeaseReleased);
+      if (interruptFiber !== undefined) yield* Fiber.join(interruptFiber);
+      const actions = Array.from(yield* Queue.takeAll(protocolEvents)).flatMap((event) => {
+        if (
+          event.direction !== "outgoing" ||
+          event.stage !== "raw" ||
+          typeof event.payload !== "string"
+        )
+          return [];
+        return event.payload.split("\n").flatMap((line) => {
+          const decoded = Option.getOrUndefined(decodeUnknownJson(line));
+          if (typeof decoded !== "object" || decoded === null || !("result" in decoded)) return [];
+          const result = decoded.result;
+          return typeof result === "object" && result !== null && "action" in result
+            ? [result.action]
+            : [];
+        });
+      });
+      assert.deepEqual(actions, ["accept"]);
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
-
   it.live("auto-approves tagged MCP elicitations under full-access policy", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -3862,7 +5506,7 @@ describe("AcpAdapterV2", () => {
 
       assert.isFalse(events.some((event) => event.type === "runtime_request.updated"));
       assert.isTrue(events.some((event) => event.type === "turn.terminal"));
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("fails a held native response acknowledgement before normal session close", () =>
@@ -3970,7 +5614,7 @@ describe("AcpAdapterV2", () => {
       assert.include(responseLifecycle, "failed");
       yield* Deferred.succeed(releaseResponseAcknowledgement, undefined);
       yield* Fiber.join(closeFiber);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("rejects delayed native response registration when normal close wins the permit", () =>
@@ -4084,7 +5728,7 @@ describe("AcpAdapterV2", () => {
       assert.equal(responseLifecycle.filter((event) => event === "admission_rejected").length, 1);
       yield* Deferred.succeed(releaseTransportClose, undefined);
       yield* Fiber.join(closeFiber);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("bounds a missing pending permission response acknowledgement", () =>
@@ -4225,7 +5869,7 @@ describe("AcpAdapterV2", () => {
       assert.include(responseLifecycle, "late_noop");
       yield* Scope.close(sessionScope, Exit.void);
       assert.notInclude(yield* pollProtocolMethods(protocolEvents), "session/close");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("defers caller cancellation until a pending response acknowledgement is bounded", () =>
@@ -4341,7 +5985,7 @@ describe("AcpAdapterV2", () => {
       yield* Fiber.join(cancellationFiber);
       yield* Fiber.join(interruptFiber);
       assert.isTrue(yield* Deferred.isDone(releaseNativeHook));
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("waits for immediate allow and deny permission responses before hard teardown", () =>
@@ -4446,7 +6090,7 @@ describe("AcpAdapterV2", () => {
           yield* Fiber.interrupt(turnFiber).pipe(Effect.forkDetach);
         }).pipe(Effect.scoped);
       }
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("waits for immediate URL elicitation responses before hard teardown", () =>
@@ -4539,7 +6183,7 @@ describe("AcpAdapterV2", () => {
       yield* Deferred.succeed(releaseResponseAcknowledgement, undefined);
       yield* Fiber.join(interruptFiber);
       yield* Fiber.interrupt(turnFiber).pipe(Effect.forkDetach);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("bounds a missing immediate response acknowledgement before hard teardown", () =>
@@ -4632,7 +6276,7 @@ describe("AcpAdapterV2", () => {
       });
       assert.isAtLeast((yield* Clock.currentTimeMillis) - startedAt, 1_500);
       yield* Fiber.interrupt(turnFiber).pipe(Effect.forkDetach);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("rejects an elicitation response when hard teardown wins admission", () =>
@@ -4745,7 +6389,7 @@ describe("AcpAdapterV2", () => {
         assert.fail("teardown winning admission must reject the elicitation response");
       }
       assert.include(Cause.pretty(responseExit.cause), "No pending ACP runtime request");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("releases an ACP turn when cancellation times out", () =>
@@ -4848,7 +6492,7 @@ describe("AcpAdapterV2", () => {
         ),
         Stream.runHead,
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("treats a second hard Stop as success when the turn is already gone", () =>
@@ -4946,7 +6590,7 @@ describe("AcpAdapterV2", () => {
         }
       }
       assert.equal(terminal, "interrupted");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("finalizes a settled turn held open for background work when interrupted", () =>
@@ -5040,7 +6684,7 @@ describe("AcpAdapterV2", () => {
         }
       }
       assert.equal(terminalStatus, "interrupted");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -5188,7 +6832,7 @@ describe("AcpAdapterV2", () => {
         }
         assert.equal(carriedItemStatus, "completed");
         assert.equal(secondTerminalStatus, "completed");
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -5337,7 +6981,7 @@ describe("AcpAdapterV2", () => {
           yield* hasPendingBackgroundWork,
           "hasPendingBackgroundWork must clear after carryover subagent terminals",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("handles a child terminal after carryover rehydrate", () =>
@@ -5572,7 +7216,7 @@ describe("AcpAdapterV2", () => {
 
       yield* Deferred.succeed(releaseSecondPromptCompletion, undefined);
       yield* Fiber.join(secondTurnFiber);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -5795,7 +7439,7 @@ describe("AcpAdapterV2", () => {
             "finalize-window terminal must clear the carryover pin",
           );
         }).pipe(Effect.provideService(Clock.Clock, blockingClock));
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -6016,7 +7660,7 @@ describe("AcpAdapterV2", () => {
         assert.equal(attachTerminal, "completed");
         assert.equal(completedAfterAttach, 1);
         assert.isFalse(yield* hasPendingBackgroundWork);
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("finishes a settled root's carryover subagent from its structured end", () =>
@@ -6164,7 +7808,7 @@ describe("AcpAdapterV2", () => {
         yield* hasPendingBackgroundWork,
         "a finished carryover subagent stops pinning",
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("projects completed-root carryover eagerly and drain cannot resurrect it", () =>
@@ -6414,7 +8058,7 @@ describe("AcpAdapterV2", () => {
         "buffered spawn ACK must not create a continuation-owned turn item",
       );
       assert.isFalse(yield* hasPendingBackgroundWork);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -6702,7 +8346,7 @@ describe("AcpAdapterV2", () => {
           "queued continuation must drain the wake content after the user run",
         );
         assert.isFalse(yield* hasPendingBackgroundWork);
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -6945,7 +8589,7 @@ describe("AcpAdapterV2", () => {
         }
         assert.equal(completedSubagentTurnItems, 1);
         assert.isFalse(yield* hasPendingBackgroundWork);
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("projects an interrupted root-session end notice at the next attach", () =>
@@ -7172,7 +8816,7 @@ describe("AcpAdapterV2", () => {
       }
       assert.equal(completedSubagentTurnItems, 1);
       assert.isFalse(yield* hasPendingBackgroundWork);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -7443,7 +9087,7 @@ describe("AcpAdapterV2", () => {
           yield* hasPendingBackgroundWork,
           "pin must clear after the continuation drains, not when the child session completed",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -7685,7 +9329,7 @@ describe("AcpAdapterV2", () => {
           yield* hasPendingBackgroundWork,
           "hasPendingBackgroundWork must end false after the continuation drains",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -7863,7 +9507,7 @@ describe("AcpAdapterV2", () => {
           1,
           "settled soft steer must not respawn the ACP runtime process",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("preserveRuntimeOnSettledInterrupt does not soften a mid-prompt steering interrupt", () =>
@@ -7951,7 +9595,7 @@ describe("AcpAdapterV2", () => {
         assert.fail("mid-prompt steering interrupt must still take the hard teardown path");
       }
       assert.include(Cause.pretty(interruptExit.cause), "session is poisoned");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live(
@@ -8147,7 +9791,7 @@ describe("AcpAdapterV2", () => {
           0,
           "a cancel-backgrounded task completion must not wake a synthetic continuation run",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("direct Stop quarantine drops late background task mutations from the stopped run", () =>
@@ -8294,7 +9938,7 @@ describe("AcpAdapterV2", () => {
         yield* hasPendingBackgroundWork,
         "direct Stop quarantine must drop residual background task mutations from the stopped run",
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("production Grok interrupt flags still hard-kill and respawn on user Stop", () =>
@@ -8420,7 +10064,7 @@ describe("AcpAdapterV2", () => {
         2,
         "user Stop with production Grok flags must replace the ACP runtime process",
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   // it.live: ownDetachedProcessGroup teardown uses wall-clock sleeps; under
@@ -8729,7 +10373,7 @@ describe("AcpAdapterV2", () => {
           "Stop quarantine must drop turn-1 subagent carryover on the respawned runtime",
         );
         assert.equal(secondTerminalStatus, "completed");
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("Direct Stop projects an interrupt-deferred terminal exactly once", () =>
@@ -8924,7 +10568,7 @@ describe("AcpAdapterV2", () => {
       }
       assert.equal(completedAfterStop, 1);
       assert.isFalse(yield* hasPendingBackgroundWork);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -9094,7 +10738,7 @@ describe("AcpAdapterV2", () => {
         }
         assert.equal(firstTerminalStatus, "interrupted");
         assert.equal(subagentPhase, "spawn");
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -9225,7 +10869,7 @@ describe("AcpAdapterV2", () => {
           yield* hasPendingBackgroundWork,
           "wake buffer must not stay non-empty and pin idle release after an already-handled re-report",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -9347,7 +10991,7 @@ describe("AcpAdapterV2", () => {
         yield* first.clearIfCurrent!();
         yield* lateTool("new-result-after-worker-drop");
         assert.lengthOf(continuationRequests, 2);
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("keeps a buffered continuation current when a user turn starts before dispatch", () =>
@@ -9554,7 +11198,7 @@ describe("AcpAdapterV2", () => {
       assert.equal(continuationTerminalStatus, "completed");
       assert.isTrue(bufferedTextSeen, "continuation must drain the wake buffer after the user run");
       assert.isFalse(yield* hasPendingBackgroundWork);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -9720,7 +11364,7 @@ describe("AcpAdapterV2", () => {
           reportSeen,
           "the injected-turn report must project before the turn finalizes",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -9922,7 +11566,7 @@ describe("AcpAdapterV2", () => {
           0,
           "settle-without-report with mid-hold ext completion must not open a wake after the report streams",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -10162,7 +11806,7 @@ describe("AcpAdapterV2", () => {
           0,
           "pre-settle arm must be cleared when the injected report streams; no duplicate wake",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -10381,7 +12025,7 @@ describe("AcpAdapterV2", () => {
           1,
           "exactly one continuation when the last running task ends post-finalize with kept midTurn marks",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -10596,7 +12240,7 @@ describe("AcpAdapterV2", () => {
           0,
           "interrupted turns must clear midTurn marks; B ending post-finalize must not offer",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -10970,7 +12614,7 @@ describe("AcpAdapterV2", () => {
           yield* hasPendingBackgroundWork,
           "wake buffer must not retain turn-1 or turn-2 in-turn-handled ack residue",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("a wake names work that ended while the previous wake was queued", () =>
@@ -11124,7 +12768,7 @@ describe("AcpAdapterV2", () => {
         outcome: "completed",
         summary: 'Command "sleep b" finished',
       });
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("mid-turn completed mutation defers offer until finalize only when unhandled", () =>
@@ -11453,7 +13097,7 @@ describe("AcpAdapterV2", () => {
         0,
         "post-finalize must not offer when the mid-turn completion was handled in-turn",
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -11642,7 +13286,7 @@ describe("AcpAdapterV2", () => {
           beforeWhitespace.messages,
           "whitespace-only late chunks must not mutate the loaded history snapshot",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("empty-drain continuation turn waits the quiet window so late frames can attach", () =>
@@ -11886,7 +13530,7 @@ describe("AcpAdapterV2", () => {
         }
       }
       assert.equal(continuationTerminal, "completed");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("empty-drain continuation turn finalizes after the quiet window with no frames", () =>
@@ -12076,7 +13720,7 @@ describe("AcpAdapterV2", () => {
         }
       }
       assert.equal(continuationTerminal, "completed");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("restarts the ACP child process before the next prompt after interrupt", () =>
@@ -12173,7 +13817,7 @@ describe("AcpAdapterV2", () => {
         Option.isSome(loadAfterRestart),
         "post-interrupt startTurn should respawn the runtime and replay session/resume",
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect("Windows teardown is one-shot explicitly with independent finalizer cleanup", () =>
@@ -12219,7 +13863,7 @@ describe("AcpAdapterV2", () => {
       assert.equal(taskkillCommands.length, 1);
       yield* Scope.close(runtimeScope, Exit.void);
       assert.equal(taskkillCommands.length, 1);
-    }).pipe(Effect.provide(testLayer)),
+    }).pipe(Effect.provide(layerTest)),
   );
 
   it("accepts only taskkill exit code zero as successful tree termination", () => {
@@ -12322,7 +13966,7 @@ describe("AcpAdapterV2", () => {
       );
       const error = yield* Effect.flip(runtime.terminateProcessGroup!);
       assert.equal(error.detail, "mock taskkill failure");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("poisons the session when hard teardown defects and blocks replacement work", () =>
@@ -12540,7 +14184,7 @@ describe("AcpAdapterV2", () => {
       assert.isFalse(processExists(commandSleepPid!));
       const finalizerMethods = yield* pollProtocolMethods(protocolEvents);
       assert.notInclude(finalizerMethods, "session/close");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("durably poisons start and resume when required hard teardown is unavailable", () =>
@@ -12629,7 +14273,7 @@ describe("AcpAdapterV2", () => {
         .pipe(Effect.exit);
       if (Exit.isSuccess(resumeExit)) assert.fail("poisoned session must reject resumeThread");
       assert.include(Cause.pretty(resumeExit.cause), "session is poisoned");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("holds concurrent startTurn behind successful hard teardown and reloads once", () =>
@@ -12742,7 +14386,7 @@ describe("AcpAdapterV2", () => {
           Stream.runHead,
         );
       }
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("quarantines old-runtime callbacks after successful hard teardown", () =>
@@ -13104,7 +14748,7 @@ describe("AcpAdapterV2", () => {
         }),
         requestRuntimeRestart: true,
       });
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("keeps stale deferred cleanup inert while replacement requests remain live", () =>
@@ -13229,7 +14873,7 @@ describe("AcpAdapterV2", () => {
         }
         replacementTerminal = event.type === "turn.terminal";
       }
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("resolves owner cancellation and concurrent resume waiters after hard teardown", () =>
@@ -13362,7 +15006,7 @@ describe("AcpAdapterV2", () => {
       const methodsAfterRestart = yield* pollProtocolMethods(protocolEvents);
       assert.equal(methodsAfterRestart.filter((method) => method === "session/resume").length, 2);
       assert.equal(methodsAfterRestart.filter((method) => method === "session/fork").length, 1);
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("direct Stop skips uninterruptible ACP cancel and recovers after native teardown", () =>
@@ -13638,7 +15282,7 @@ describe("AcpAdapterV2", () => {
         stoppedRunTextOnFollowUp,
         "stopped-run residual text must not attach to the follow-up run",
       );
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.effect(
@@ -13793,7 +15437,7 @@ describe("AcpAdapterV2", () => {
           carriedCompleted,
           "Direct Stop must not carry a stopped subagent into the follow-up run",
         );
-      }).pipe(Effect.provide(testLayer), Effect.scoped),
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("restart_active terminates native work and reloads a clean runtime", () =>
@@ -13979,7 +15623,7 @@ describe("AcpAdapterV2", () => {
       }
       assert.equal(secondTerminal, "completed");
       assert.isFalse(staleEventSeen, "interrupted runtime events must not attach to attempt 2");
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 });
 

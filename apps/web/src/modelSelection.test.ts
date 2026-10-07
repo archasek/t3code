@@ -904,3 +904,124 @@ describe("resolveAppModelSelectionState with the opencode plan agent", () => {
     );
   });
 });
+
+it.each(["default", "auto", "", "openai/removed-model", "openai/gpt-6-luna"])(
+  "keeps MC %j through project, thread and draft composer resolution",
+  (model) => {
+    const instanceId = ProviderInstanceId.make("mastraCode");
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS };
+    const providers = [
+      provider({
+        provider: ProviderDriverKind.make("mastraCode"),
+        instanceId,
+        models: ["openai/gpt-6.1-sol", "openai/gpt-5.6-sol", "openai/gpt-6-luna"],
+      }),
+    ];
+    for (const mode of ["default", "plan"] as const) {
+      expect(
+        resolveAppModelSelectionForInstance(instanceId, settings, providers, model, {
+          interactionMode: mode,
+        }),
+      ).toBe(model);
+    }
+    const selection = { instanceId, model };
+    for (const source of ["project", "thread", "draft"] as const) {
+      const state = deriveEffectiveComposerModelState({
+        draft:
+          source === "draft"
+            ? { activeProvider: instanceId, modelSelectionByProvider: { [instanceId]: selection } }
+            : null,
+        selectedProvider: ProviderDriverKind.make("mastraCode"),
+        selectedInstanceId: instanceId,
+        projectModelSelection: source === "project" ? selection : null,
+        threadModelSelection: source === "thread" ? selection : null,
+        providers,
+        settings,
+      });
+      expect(state.selectedModel).toBe(model);
+    }
+    if (model === "openai/removed-model") {
+      expect(
+        getAppModelOptionsForInstance(
+          settings,
+          deriveProviderInstanceEntries(providers)[0]!,
+          model,
+        ),
+      ).toContainEqual(expect.objectContaining({ slug: model, isUnavailable: true }));
+    }
+  },
+);
+
+it("web MC resolution preserves session-wide models and native-default intent across modes", () => {
+  const instanceId = ProviderInstanceId.make("mastraCode");
+  const settings = { ...DEFAULT_UNIFIED_SETTINGS };
+  const providers = [
+    {
+      instanceId,
+      driver: "mastraCode",
+      enabled: true,
+      installed: true,
+      auth: { status: "authenticated" },
+      models: [
+        {
+          slug: "build",
+          name: "Build",
+          isCustom: false,
+          isDefault: true,
+          capabilities: null,
+          supportedInteractionModes: ["default"],
+        },
+        {
+          slug: "plan",
+          name: "Plan",
+          isCustom: false,
+          capabilities: null,
+          supportedInteractionModes: ["plan"],
+        },
+        {
+          slug: "both",
+          name: "Both",
+          isCustom: false,
+          capabilities: null,
+          supportedInteractionModes: ["default", "plan"],
+        },
+        { slug: "absent", name: "Absent metadata", isCustom: false, capabilities: null },
+        { slug: "custom", name: "Custom", isCustom: true, capabilities: null },
+      ],
+    },
+  ] as unknown as ServerProvider[];
+  expect(
+    resolveAppModelSelectionForInstance(instanceId, settings, providers, "build", {
+      interactionMode: "plan",
+    }),
+  ).toBe("build");
+  expect(
+    resolveAppModelSelectionForInstance(instanceId, settings, providers, "plan", {
+      interactionMode: "default",
+    }),
+  ).toBe("plan");
+  expect(
+    resolveAppModelSelectionForInstance(instanceId, settings, providers, "both", {
+      interactionMode: "plan",
+    }),
+  ).toBe("both");
+  expect(
+    resolveAppModelSelectionForInstance(instanceId, settings, providers, "absent", {
+      interactionMode: "plan",
+    }),
+  ).toBe("absent");
+  expect(
+    resolveAppModelSelectionForInstance(instanceId, settings, providers, "custom", {
+      interactionMode: "plan",
+    }),
+  ).toBe("custom");
+  const planOnly = providers.map((provider) => ({
+    ...provider,
+    models: provider.models.filter((model) => model.slug === "plan"),
+  }));
+  expect(
+    resolveAppModelSelectionForInstance(instanceId, settings, planOnly, "stale", {
+      interactionMode: "default",
+    }),
+  ).toBe("stale");
+});

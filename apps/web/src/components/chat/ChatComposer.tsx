@@ -1657,6 +1657,7 @@ export interface ChatComposerProps {
     nextCursor: number,
     expandedCursor: number,
     cursorAdjacentToMention: boolean,
+    origin?: "literal-input",
   ) => void;
 
   onProviderModelSelect: (
@@ -2144,6 +2145,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     ? runtimeMode
     : (compatibleRuntimeModeOptions[0]?.mode ?? runtimeMode);
 
+  const { enabled: planModeUiEnabled, interactionMode } = resolveComposerInteractionMode({
+    planModeEnabled: settings.planModeEnabled,
+    provider: selectedProviderEntry?.snapshot ?? null,
+    interactionMode: requestedInteractionMode,
+  });
   const { modelOptions: composerModelOptions, selectedModel } = useEffectiveComposerModelState({
     threadRef: composerDraftTarget,
     providers: providerStatuses,
@@ -2170,12 +2176,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedProviderEntry],
   );
   const compactCommandAvailable = providerSupportsManualCompaction(selectedProviderEntry);
-  const selectedProviderSkills = selectedProviderStatus
-    ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd)
-    : [];
-  const selectedProviderSlashCommands = selectedProviderStatus
-    ? resolveProviderSlashCommandsForCwd(selectedProviderStatus, gitCwd)
-    : [];
+  // Memoized so the composer menu memo below can cache between renders.
+  const selectedProviderSkills = useMemo(
+    () =>
+      selectedProviderStatus ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd) : [],
+    [gitCwd, selectedProviderStatus],
+  );
+  const selectedProviderSlashCommands = useMemo(
+    () =>
+      selectedProviderStatus
+        ? resolveProviderSlashCommandsForCwd(selectedProviderStatus, gitCwd)
+        : [],
+    [gitCwd, selectedProviderStatus],
+  );
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
@@ -2299,11 +2312,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const selectedPromptEffort = composerProviderState.promptEffort;
   const selectedModelOptionsForDispatch = composerProviderState.modelOptionsForDispatch;
-  const { enabled: planModeUiEnabled, interactionMode } = resolveComposerInteractionMode({
-    planModeEnabled: settings.planModeEnabled,
-    provider: selectedProviderStatus,
-    interactionMode: requestedInteractionMode,
-  });
+
   const selectedModelSelection = useMemo<ModelSelection>(
     () => createModelSelection(selectedInstanceId, selectedModel, selectedModelOptionsForDispatch),
     [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
@@ -2526,7 +2535,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const settledPullRequestTextQuery =
     pullRequestTextQuery === debouncedPullRequestTextQuery ? pullRequestTextQuery : null;
   const isPathTrigger = composerTriggerKind === "path";
-  const environmentThreadShells = useThreadShells();
+  // Thread shells only feed `@` thread matches, so skip shell updates otherwise.
+  const environmentThreadShells = useThreadShells(isPathTrigger);
   const workspaceEntries = useComposerPathSearch({
     environmentId,
     cwd: isPathTrigger ? gitCwd : null,
@@ -6605,11 +6615,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         : null}
       <ComposerBanner.Dock>
         <ComposerBanner.Column>
-          {props.queuedRunsControl}
           <ComposerBannerStack
             key={activeThreadId}
             className="relative z-0"
             items={bannerStackItems}
+            attachedAbove={props.queuedRunsControl}
           />
           {!activityStackItem && (shownSyncPhase || inlineTasksBadge) ? (
             <ComposerBanner.Attachment>
@@ -6662,6 +6672,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     answers={activePendingDraftAnswers}
                     questionIndex={activePendingQuestionIndex}
                     onToggleOption={onSelectActivePendingUserInputOption}
+                    onChangeCustomAnswer={(id, value) =>
+                      onChangeActivePendingUserInputCustomAnswer(
+                        id,
+                        value,
+                        value.length,
+                        value.length,
+                        false,
+                        "literal-input",
+                      )
+                    }
                     onAdvance={onAdvanceActivePendingUserInput}
                     onDismiss={onDismissActivePendingUserInput}
                   />
@@ -6682,6 +6702,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       answers={activePendingDraftAnswers}
                       questionIndex={activePendingQuestionIndex}
                       onToggleOption={onSelectActivePendingUserInputOption}
+                      onChangeCustomAnswer={(id, value) =>
+                        onChangeActivePendingUserInputCustomAnswer(
+                          id,
+                          value,
+                          value.length,
+                          value.length,
+                          false,
+                          "literal-input",
+                        )
+                      }
                       onAdvance={onAdvanceActivePendingUserInput}
                       onDismiss={onDismissActivePendingUserInput}
                     />

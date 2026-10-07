@@ -54,6 +54,28 @@ const nativeChoiceQuestion = {
 } as const;
 
 describe("resolvePendingUserInputAnswer", () => {
+  it.each(["", "  ", " padded ", "first\nsecond\n"])(
+    "preserves raw MC answer %j",
+    (customAnswer) => {
+      const question = {
+        ...singleSelectQuestion,
+        answerFormat: "raw-string" as const,
+        allowEmptyAnswer: true,
+      };
+      expect(resolvePendingUserInputAnswer(question, undefined)).toBeNull();
+      const draft = setPendingUserInputCustomAnswer(
+        { selectedOptionValues: ["Orchestration-first"] },
+        customAnswer,
+        question,
+      );
+      expect(resolvePendingUserInputAnswer(question, draft)).toBe(customAnswer);
+      expect(
+        derivePendingUserInputProgress([question], { scope: draft }, 0).usingCustomAnswer,
+      ).toBe(true);
+      const option = togglePendingUserInputOptionSelection(question, draft, "Orchestration-first");
+      expect(resolvePendingUserInputAnswer(question, option)).toBe("Orchestration-first");
+    },
+  );
   it("prefers a custom answer over selected options", () => {
     expect(
       resolvePendingUserInputAnswer(singleSelectQuestion, {
@@ -364,4 +386,114 @@ describe("carryDisplacedCustomAnswerIntoPrompt", () => {
       "first half\n\nsecond half",
     );
   });
+});
+
+it.each([false, undefined, true])(
+  "only completes raw empty text with established eligibility (%s)",
+  (allowEmptyAnswer) => {
+    const question = {
+      ...singleSelectQuestion,
+      answerFormat: "raw-string" as const,
+      allowEmptyAnswer,
+    };
+    const draft = setPendingUserInputCustomAnswer(undefined, "", question);
+    expect(buildPendingUserInputAnswers([question], { [question.id]: draft })).toEqual(
+      allowEmptyAnswer ? { [question.id]: "" } : null,
+    );
+    expect(resolvePendingUserInputAnswer(question, { customAnswer: "  " })).toBe("  ");
+    if (allowEmptyAnswer !== true) {
+      expect(
+        resolvePendingUserInputAnswer(question, {
+          customAnswer: "",
+          selectedOptionValues: ["Orchestration-first"],
+          attachmentCount: 1,
+        }),
+      ).toBeNull();
+      expect(resolvePendingUserInputAnswer(question, { attachmentCount: 1 })).toBeNull();
+    }
+  },
+);
+
+it("keeps omission exclusive in the web answer and preserves ordinary multi-select", () => {
+  const question = {
+    ...multiSelectQuestion,
+    options: [
+      { label: "First", description: "", value: "a" },
+      { label: "Second", description: "", value: "b" },
+      { label: "Leave unset", description: "", value: "collision-safe-omit", exclusive: true },
+    ],
+  };
+  let draft = togglePendingUserInputOptionSelection(question, undefined, "a");
+  draft = togglePendingUserInputOptionSelection(question, draft, "b");
+  expect(resolvePendingUserInputAnswer(question, draft)).toEqual(["a", "b"]);
+  draft = togglePendingUserInputOptionSelection(question, draft, "collision-safe-omit");
+  expect(resolvePendingUserInputAnswer(question, draft)).toEqual(["collision-safe-omit"]);
+  draft = togglePendingUserInputOptionSelection(question, draft, "a");
+  expect(resolvePendingUserInputAnswer(question, draft)).toEqual(["a"]);
+  draft = togglePendingUserInputOptionSelection(question, draft, "collision-safe-omit");
+  draft = togglePendingUserInputOptionSelection(question, draft, "collision-safe-omit");
+  expect(resolvePendingUserInputAnswer(question, draft)).toBeNull();
+});
+
+it.each(["", " \t"])("completes an exact native string choice %j", (value) => {
+  const question = {
+    id: "choice",
+    header: "Choice",
+    question: "Choose a value",
+    multiSelect: false,
+    allowCustomAnswer: false,
+    options: [
+      { label: '""', description: "Empty string", value: "" },
+      { label: '" \\t"', description: "Whitespace string", value: " \t" },
+    ],
+  };
+  expect(buildPendingUserInputAnswers([question], {})).toBeNull();
+  const draft = togglePendingUserInputOptionSelection(question, undefined, value);
+  expect(buildPendingUserInputAnswers([question], { choice: draft })).toEqual({ choice: value });
+  const selectedAgain = togglePendingUserInputOptionSelection(question, draft, value);
+  expect(buildPendingUserInputAnswers([question], { choice: selectedAgain })).toEqual({
+    choice: value,
+  });
+});
+
+it("builds distinct empty-array, real-item and omission answers with exclusive toggles", () => {
+  const empty = "request-1:empty-array:tags";
+  const omit = "request-1:omit:tags";
+  const question = {
+    id: "tags",
+    header: "Tags",
+    question: "Choose tags",
+    multiSelect: true,
+    allowCustomAnswer: false,
+    options: [
+      { label: '""', description: "Empty string item", value: "" },
+      { label: '" \\t"', description: "Whitespace item", value: " \t" },
+      { label: "X", description: "Real item", value: "x" },
+      { label: "Use empty array", description: "No items", value: empty, exclusive: true },
+      { label: "Leave unset", description: "Omit property", value: omit, exclusive: true },
+    ],
+  };
+  expect(buildPendingUserInputAnswers([question], {})).toBeNull();
+  let draft = togglePendingUserInputOptionSelection(question, undefined, "");
+  expect(buildPendingUserInputAnswers([question], { tags: draft })).toEqual({ tags: [""] });
+  draft = togglePendingUserInputOptionSelection(question, draft, " \t");
+  expect(buildPendingUserInputAnswers([question], { tags: draft })).toEqual({ tags: ["", " \t"] });
+  for (const [value, expected] of [
+    [empty, [empty]],
+    ["x", ["x"]],
+    [omit, [omit]],
+    [empty, [empty]],
+    [omit, [omit]],
+    ["", [""]],
+    ["", null],
+    [empty, [empty]],
+    [empty, null],
+    [omit, [omit]],
+    [omit, null],
+  ] as const) {
+    draft = togglePendingUserInputOptionSelection(question, draft, value);
+    expect(buildPendingUserInputAnswers([question], { tags: draft })).toEqual(
+      expected === null ? null : { tags: expected },
+    );
+  }
 });

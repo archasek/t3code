@@ -16,6 +16,7 @@ import {
   DEFAULT_RUNTIME_MODE,
   DEFAULT_SERVER_SETTINGS,
   MessageId,
+  repositoryGroupingKeyOf,
   T3_PROJECT_FILE_NAME,
   ThreadId,
 } from "@t3tools/contracts";
@@ -393,7 +394,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   // whatever unrelated project happens to be first on the other machine. Repository
   // identity is the primary signal; projects that haven't reported one yet (still
   // indexing) fall back to workspace basename / title so a valid host isn't hidden.
-  const selectedRepositoryKey = selectedProject?.repositoryIdentity?.canonicalKey ?? null;
+  const selectedRepositoryKey = selectedProject?.repositoryIdentity
+    ? repositoryGroupingKeyOf(selectedProject.repositoryIdentity)
+    : null;
   // `|| null` (not `??`): a pending-task placeholder project can have an empty
   // workspaceRoot, and an "" basename would reject every real host below.
   const selectedWorkspaceBasename = selectedProject?.workspaceRoot.split("/").at(-1) || null;
@@ -414,7 +417,9 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       if (selectedRepositoryKey === null && selectedWorkspaceBasename === null) {
         return true;
       }
-      const projectKey = project.repositoryIdentity?.canonicalKey ?? null;
+      const projectKey = project.repositoryIdentity
+        ? repositoryGroupingKeyOf(project.repositoryIdentity)
+        : null;
       if (selectedRepositoryKey !== null && projectKey !== null) {
         return projectKey === selectedRepositoryKey;
       }
@@ -542,30 +547,39 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
   // Antigravity keeps unavailable selections so sign-out or a catalog change
   // cannot switch the user's model. Other providers retain their fallback
   // rules. Implicit defaults also exclude legacy models for those providers.
+  const requestedModelInteractionMode = legacyPlanModeEnabled
+    ? (selectedProjectDraft.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE)
+    : DEFAULT_PROVIDER_INTERACTION_MODE;
   const draftModelSelection = resolveSelectableModelSelection(
     selectedEnvironmentServerConfig,
     selectedProjectDraft.modelSelection ?? null,
+    requestedModelInteractionMode,
   );
   const projectDefaultModelSelection = resolveDefaultableModelSelection(
     selectedEnvironmentServerConfig,
     projectSettings.settings.defaultModelSelection,
+    requestedModelInteractionMode,
   );
   const storedStickyModelSelection = useStickyComposerModelSelection();
   const stickyModelSelection = resolveDefaultableModelSelection(
     selectedEnvironmentServerConfig,
     storedStickyModelSelection,
+    requestedModelInteractionMode,
   );
   const modelOptions = useMemo(
     () =>
       buildModelOptions(
         selectedEnvironmentServerConfig,
         draftModelSelection ?? projectDefaultModelSelection ?? stickyModelSelection,
+        undefined,
+        requestedModelInteractionMode,
       ),
     [
       selectedEnvironmentServerConfig,
       draftModelSelection,
       projectDefaultModelSelection,
       stickyModelSelection,
+      requestedModelInteractionMode,
     ],
   );
 
@@ -608,7 +622,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         return;
       }
       const option = modelOptions.find((candidate) => candidate.key === key);
-      if (!option) {
+      if (!option || (option.providerDriver === "mastraCode" && option.isUnavailable)) {
         return;
       }
       const selection = withRememberedModelOptions(
@@ -1081,6 +1095,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
         resolveSelectableModelSelection(
           selectedEnvironmentServerConfig,
           draft.modelSelection ?? null,
+          interactionMode,
         ) ?? selectedModel;
       if (text.length === 0 || !draftModelSelection) {
         return null;
@@ -1151,6 +1166,7 @@ export function NewTaskFlowProvider(props: React.PropsWithChildren) {
       defaultRuntimeMode,
       editingPendingProject,
       editingPendingTask,
+      interactionMode,
       selectedEnvironmentServerConfig,
       selectedModel,
       selectedProject,

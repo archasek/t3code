@@ -1,4 +1,9 @@
-import type { ProviderOptionChoice, ProviderOptionDescriptor } from "@t3tools/contracts";
+import type {
+  ModelSelection,
+  ProviderInstanceId,
+  ProviderOptionChoice,
+  ProviderOptionDescriptor,
+} from "@t3tools/contracts";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
 import type { AcpSessionModeState } from "./AcpRuntimeModel.ts";
@@ -27,6 +32,24 @@ const boundedText = (value: string | null | undefined, maximumLength: number): s
 
 const boundedOpaqueValue = (value: string, maximumLength: number): string | undefined =>
   value.length > 0 && value === value.trim() && value.length <= maximumLength ? value : undefined;
+
+/** Report native selection per session; never turn it into a dispatch default. */
+export function acpReportedModelSelection(
+  configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>,
+  instanceId: ProviderInstanceId,
+): ModelSelection | undefined {
+  const modelOption = configOptions.find(
+    (option) => option.category === "model" && option.type === "select",
+  );
+  if (modelOption === undefined || modelOption.type !== "select") return undefined;
+  const model = boundedOpaqueValue(modelOption.currentValue, MAX_TEXT_LENGTH);
+  if (model === undefined) return undefined;
+  const options = acpProviderOptionDescriptors({ configOptions, modeState: undefined }).flatMap(
+    (option) =>
+      option.currentValue === undefined ? [] : [{ id: option.id, value: option.currentValue }],
+  );
+  return { instanceId, model, options };
+}
 
 function flattenSelectChoices(
   options: EffectAcpSchema.SessionConfigSelectOptions,

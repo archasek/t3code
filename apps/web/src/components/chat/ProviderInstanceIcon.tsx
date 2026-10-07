@@ -9,6 +9,7 @@ import {
   CursorIcon,
   GrokIcon,
   Icon,
+  MastraCodeIcon,
   OpenAI,
   OpenCodeIcon,
   PiAgentIcon,
@@ -22,6 +23,7 @@ import {
 } from "../settings/AcpRegistryIcon";
 
 const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>> = {
+  [ProviderDriverKind.make("mastraCode")]: MastraCodeIcon,
   [ProviderDriverKind.make("codex")]: OpenAI,
   [ProviderDriverKind.make("claudeAgent")]: ClaudeAI,
   [ProviderDriverKind.make("opencode")]: OpenCodeIcon,

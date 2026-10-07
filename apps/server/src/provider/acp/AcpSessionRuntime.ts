@@ -20,8 +20,8 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import * as ChildProcess from "effect/unstable/process/ChildProcess";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as EffectAcpClient from "effect-acp/client";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
@@ -87,6 +87,7 @@ export interface AcpSpawnInput {
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly extendEnv?: boolean;
+  readonly shell?: false;
 }
 
 export interface AcpSessionRuntimeOptions {
@@ -96,6 +97,8 @@ export interface AcpSessionRuntimeOptions {
   readonly resumeMethod?: "load" | "resume";
   readonly sessionLoadTimeout?: Duration.Input;
   readonly sessionLoadReplayIdleGap?: Duration.Input;
+  /** Require native load acknowledgement, even after replay becomes idle. */
+  readonly sessionLoadRequireRpcResponse?: boolean;
   readonly interruptPromptOnCancel?: boolean;
   /** Optional provider metadata forwarded on `session/cancel`. */
   readonly cancelMeta?: EffectAcpSchema.CancelNotification["_meta"];
@@ -1386,7 +1389,8 @@ export const make = (
   Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const runtimeScope = yield* Scope.Scope;
+    // A child of the caller's scope, so termination can close the runtime without closing the caller's.
+    const runtimeScope = yield* Scope.fork(yield* Scope.Scope);
     const eventQueue = yield* Queue.unbounded<AcpSessionRuntimeEvent>();
     const modeStateRef = yield* Ref.make<AcpSessionModeState | undefined>(undefined);
     const toolCallsRef = yield* Ref.make(new Map<string, AcpToolCallTrackedState>());
@@ -1516,10 +1520,13 @@ export const make = (
         ),
       );
 
-    const spawnCommand = yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
-      ...(options.spawn.env ? { env: options.spawn.env } : {}),
-      extendEnv: options.spawn.extendEnv ?? true,
-    });
+    const spawnCommand =
+      options.spawn.shell === false
+        ? { command: options.spawn.command, args: options.spawn.args, shell: false }
+        : yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
+            ...(options.spawn.env ? { env: options.spawn.env } : {}),
+            extendEnv: options.spawn.extendEnv ?? true,
+          });
     const linuxCgroupLease =
       options.ownDescendantProcessGroups === true && options.processGroupPlatform === "linux"
         ? yield* Effect.sync(() => {
@@ -2066,10 +2073,10 @@ export const make = (
             const idleFiber = yield* waitForSessionLoadReplayIdle({
               gateRef: sessionLoadGateRef,
             }).pipe(Effect.forkIn(runtimeScope));
-            const loaded = yield* Effect.raceFirst(
-              acp.agent.loadSession(loadPayload),
-              Fiber.join(idleFiber),
-            ).pipe(
+            const load = options.sessionLoadRequireRpcResponse
+              ? acp.agent.loadSession(loadPayload)
+              : Effect.raceFirst(acp.agent.loadSession(loadPayload), Fiber.join(idleFiber));
+            const loaded = yield* load.pipe(
               Effect.ensuring(Fiber.interrupt(idleFiber).pipe(Effect.ignore)),
               Effect.timeoutOption(sessionLoadTimeout),
               Effect.flatMap((result) =>
@@ -2079,8 +2086,9 @@ export const make = (
                       new EffectAcpErrors.AcpTransportError({
                         operation: "call-rpc",
                         method: "session/load",
-                        detail:
-                          "session/load timed out waiting for RPC response or replay idle gap",
+                        detail: options.sessionLoadRequireRpcResponse
+                          ? "session/load timed out waiting for the RPC response"
+                          : "session/load timed out waiting for RPC response or replay idle gap",
                         cause: undefined,
                       }),
                     ),

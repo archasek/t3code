@@ -8,6 +8,20 @@ import {
 } from "./ProviderSettingsForm";
 
 describe("ProviderSettingsForm helpers", () => {
+  it("configures Mastra Code through its dedicated driver schema", () => {
+    const mc = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("mastraCode")];
+    expect(mc?.label).toBe("Mastra Code");
+    const fields = deriveProviderSettingsFields(mc!);
+    const binary = fields.find((field) => field.key === "binaryPath");
+    expect(binary).toBeDefined();
+    expect(fields.map((field) => field.key)).not.toContain("customModels");
+    const original = { customModels: ["model-a"] };
+    const configured = nextProviderConfigWithFieldValue(original, binary!, "/opt/bin/mastracode");
+    expect(configured).toEqual({ ...original, binaryPath: "/opt/bin/mastracode" });
+    expect(nextProviderConfigWithFieldValue(configured, binary!, "")).toEqual(original);
+    expect(original).toEqual({ customModels: ["model-a"] });
+  });
+
   it("derives visible provider config fields from the client definition schema", () => {
     const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
 
@@ -57,10 +71,18 @@ describe("ProviderSettingsForm helpers", () => {
     expect(acpRegistry).toBeDefined();
     expect(acpRegistry?.hasDefaultInstance).toBe(false);
     expect(deriveProviderSettingsFields(acpRegistry!).map((field) => field.key)).toEqual([
+      "source",
       "agentId",
       "commandPath",
       "authMethodId",
     ]);
+  });
+
+  it("shows the local executable without registry identity or authentication fields", () => {
+    const acpRegistry = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("acpRegistry")];
+    expect(
+      deriveProviderSettingsFields(acpRegistry!, { source: "local" }).map((field) => field.key),
+    ).toEqual(["source", "commandPath"]);
   });
 
   it("derives a select control with its choices for the Antigravity sign-in method", () => {

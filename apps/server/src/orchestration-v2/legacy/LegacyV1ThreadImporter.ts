@@ -11,6 +11,7 @@ import {
   ModelSelection,
   type OrchestrationV2AppThread,
   OrchestrationV2AppThreadJson,
+  OrchestrationV2ProviderThreadJson,
   type OrchestrationV2ConversationMessage,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2TurnItem,
@@ -21,17 +22,22 @@ import {
   ThreadPullRequestLink,
   TurnItemId,
 } from "@t3tools/contracts";
+import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as EventSink from "../EventSink.ts";
-import { makeKeyedSerialExecutor } from "../KeyedSerialExecutor.ts";
 import { randomUuidV4 } from "../RandomUuid.ts";
+import {
+  mastraCodeLegacyBinding,
+  type MastraCodeLegacyRuntimeRow,
+} from "./MastraCodeLegacyBinding.ts";
+import { legacyV1ProviderEvidence } from "./LegacyV1ProviderEvidence.ts";
 
 const IMPORT_EVENT_PREFIX = "migration:v1";
 const TRANSCRIPT_EVENT_BATCH_SIZE = 100;
@@ -125,6 +131,9 @@ const decodePullRequests = Schema.decodeUnknownOption(Schema.Array(ThreadPullReq
 const decodeLinkedPullRequest = Schema.decodeUnknownOption(ThreadLinkedPullRequest);
 const decodeStoredThread = Schema.decodeUnknownOption(
   Schema.fromJsonString(OrchestrationV2AppThreadJson),
+);
+const decodeStoredProviderThread = Schema.decodeUnknownOption(
+  Schema.fromJsonString(OrchestrationV2ProviderThreadJson),
 );
 
 function parseJson(json: string): unknown {
@@ -347,7 +356,7 @@ function chunks<A>(items: ReadonlyArray<A>, size: number): Array<ReadonlyArray<A
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const eventSink = yield* EventSink.EventSinkV2;
-  const transcriptImports = yield* makeKeyedSerialExecutor<ThreadId>();
+  const transcriptImports = yield* KeyedLock.make<ThreadId>();
 
   const listMessages = (threadId: ThreadId) =>
     sql<LegacyMessageRow>`
@@ -441,6 +450,53 @@ const make = Effect.gen(function* () {
     });
 
   const reconcileShellsBase = Effect.gen(function* () {
+    // A persisted V1 MC session proves that this is not a new conversation.
+    // Neither its instance name nor its visible transcript can recover the
+    // native cursor. Refuse cutover before writing shells rather than silently
+    // allowing ensureThread to create a different native conversation.
+    const missingNativeIdentity = yield* sql<{
+      readonly thread_id: string;
+      readonly provider_instance_id: string | null;
+    }>`
+      SELECT session.thread_id, session.provider_instance_id FROM projection_thread_sessions AS session
+      INNER JOIN projection_threads AS thread ON thread.thread_id = session.thread_id
+      WHERE session.provider_name = 'mastraCode'
+        AND thread.deleted_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM provider_session_runtime AS runtime
+          WHERE runtime.thread_id = session.thread_id AND runtime.provider_name = 'mastraCode'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_threads AS current
+          WHERE current.thread_id = session.thread_id
+            AND json_extract(current.payload_json, '$.deletedAt') IS NOT NULL
+        )
+    `;
+    for (const missing of missingNativeIdentity) {
+      const candidates = yield* sql<{ readonly payload_json: string }>`
+        SELECT payload_json FROM orchestration_v2_projection_provider_threads
+        WHERE thread_id = ${missing.thread_id} AND driver = 'mastraCode'
+      `;
+      const preserved = candidates.some((candidate) => {
+        const decoded = decodeStoredProviderThread(candidate.payload_json);
+        if (Option.isNone(decoded)) return false;
+        const native = decoded.value;
+        return (
+          native.appThreadId === missing.thread_id &&
+          native.ownerNodeId === null &&
+          native.driver === "mastraCode" &&
+          native.providerInstanceId === (missing.provider_instance_id ?? "mastraCode") &&
+          native.nativeThreadRef?.driver === "mastraCode" &&
+          typeof native.nativeThreadRef.nativeId === "string" &&
+          native.nativeThreadRef.nativeId.trim().length > 0
+        );
+      });
+      if (preserved) continue;
+      return yield* new LegacyV1ThreadImportError({
+        operation: "recover missing Mastra Code native session identity before cutover",
+        threadId: ThreadId.make(missing.thread_id),
+      });
+    }
     const now = DateTime.formatIso(yield* DateTime.now);
     const repairRows = yield* sql<LegacyRepairRow>`
       SELECT
@@ -586,7 +642,62 @@ const make = Effect.gen(function* () {
     let importedThreadCount = repairedThreadCount;
     let importedMessageCount = 0;
     for (const row of rows) {
-      const thread = importedThread(row);
+      let thread = importedThread(row);
+      const runtimes = yield* sql<MastraCodeLegacyRuntimeRow>`
+        SELECT provider_name, provider_instance_id, adapter_key, resume_cursor_json
+        FROM provider_session_runtime
+        WHERE thread_id = ${thread.id} AND provider_name = 'mastraCode'
+      `;
+      const legacyRuntime = runtimes[0];
+      let binding =
+        legacyRuntime === undefined ? undefined : mastraCodeLegacyBinding(thread, legacyRuntime);
+      if (binding === undefined && legacyRuntime !== undefined) {
+        // The current selection can change before cutover. Only persisted V1
+        // history, not an instance-name guess, may establish the previous owner.
+        let beforeSequence = Number.MAX_SAFE_INTEGER;
+        while (binding === undefined) {
+          const history = yield* sql<{
+            readonly sequence: number;
+            readonly event_type: string;
+            readonly payload_json: string;
+          }>`
+          SELECT sequence, event_type, payload_json FROM orchestration_events
+          WHERE application_event_version = 1 AND aggregate_kind = 'thread'
+            AND stream_id = ${thread.id}
+            AND sequence < ${beforeSequence}
+            AND event_type IN ('thread.created', 'thread.meta-updated', 'thread.turn-start-requested')
+            AND CASE WHEN json_valid(payload_json)
+              THEN json_extract(payload_json, '$.modelSelection.instanceId')
+              ELSE NULL END = ${legacyRuntime.provider_instance_id ?? "mastraCode"}
+          ORDER BY sequence DESC LIMIT 100
+        `;
+          for (const event of history) {
+            const historical = legacyV1ProviderEvidence(
+              event.event_type,
+              event.payload_json,
+              thread.id,
+            );
+            if (Option.isNone(historical)) continue;
+            binding = mastraCodeLegacyBinding(
+              { ...thread, providerInstanceId: historical.value },
+              legacyRuntime,
+            );
+            if (binding !== undefined) break;
+          }
+          const last = history.at(-1);
+          if (history.length < 100 || last === undefined) break;
+          beforeSequence = last.sequence;
+        }
+      }
+      if (legacyRuntime !== undefined && binding === undefined) {
+        return yield* new LegacyV1ThreadImportError({
+          operation: "validate Mastra Code native session ownership and resume cursor",
+          threadId: thread.id,
+        });
+      }
+      if (binding !== undefined && binding.providerInstanceId === thread.providerInstanceId) {
+        thread = { ...thread, activeProviderThreadId: binding.id };
+      }
       const previews = yield* listShellMessages(thread.id);
       const events: Array<OrchestrationV2DomainEvent> = [
         {
@@ -597,6 +708,20 @@ const make = Effect.gen(function* () {
           occurredAt: thread.createdAt,
           payload: thread,
         },
+        ...(binding === undefined
+          ? []
+          : [
+              {
+                id: EventId.make(
+                  `${IMPORT_EVENT_PREFIX}:thread:${row.thread_id}:mastracode-binding`,
+                ),
+                type: "provider-thread.updated" as const,
+                threadId: thread.id,
+                providerInstanceId: binding.providerInstanceId,
+                occurredAt: thread.updatedAt,
+                payload: binding,
+              },
+            ]),
         ...previews.flatMap(messageEvents),
         {
           id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${row.thread_id}:shell`),
@@ -651,6 +776,48 @@ const make = Effect.gen(function* () {
       );
       importedThreadCount += 1;
       importedMessageCount += previews.length;
+    }
+    // Earlier V2 builds imported only history. Repair native MC identity without
+    // replacing a newer binding or restoring callbacks from the old process.
+    const unbound = yield* sql<MastraCodeLegacyRuntimeRow & { readonly payload_json: string }>`
+      SELECT runtime.provider_name, runtime.provider_instance_id, runtime.adapter_key,
+        runtime.resume_cursor_json, projection.payload_json
+      FROM orchestration_v2_legacy_imports AS legacy
+      INNER JOIN provider_session_runtime AS runtime ON runtime.thread_id = legacy.thread_id
+      INNER JOIN orchestration_v2_projection_threads AS projection ON projection.thread_id = legacy.thread_id
+      WHERE runtime.provider_name = 'mastraCode'
+        AND json_extract(projection.payload_json, '$.historyOrigin') = 'v1_import'
+        AND json_extract(projection.payload_json, '$.activeProviderThreadId') IS NULL
+        AND json_extract(projection.payload_json, '$.providerInstanceId') = COALESCE(runtime.provider_instance_id, 'mastraCode')
+        AND NOT EXISTS (
+          SELECT 1 FROM orchestration_v2_projection_provider_threads AS native
+          WHERE native.thread_id = legacy.thread_id AND native.driver = 'mastraCode'
+        )
+    `;
+    for (const row of unbound) {
+      const decoded = decodeStoredThread(row.payload_json);
+      if (Option.isNone(decoded))
+        return yield* new LegacyV1ThreadImportError({ operation: "decode imported MC thread" });
+      const thread = decoded.value;
+      const binding = mastraCodeLegacyBinding(thread, row);
+      if (binding === undefined)
+        return yield* new LegacyV1ThreadImportError({
+          operation: "validate imported MC native session ownership and resume cursor",
+          threadId: thread.id,
+        });
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${thread.id}:mastracode-binding`),
+            type: "provider-thread.updated",
+            threadId: thread.id,
+            providerInstanceId: thread.providerInstanceId,
+            occurredAt: dateTime(now),
+            payload: binding,
+          },
+        ],
+      });
+      importedThreadCount += 1;
     }
     return { importedThreadCount, importedMessageCount };
   });

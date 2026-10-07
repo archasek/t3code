@@ -527,3 +527,8 @@ export function applyClaudePromptEffortPrefix(
   }
   return `Ultrathink:\n${trimmed}`;
 }
+
+/** MC owns its session-wide default and rejects unavailable explicit IDs itself. */
+export function resolveMastraCodeModelSelection(selected: string | null | undefined): string {
+  return selected ?? "default";
+}

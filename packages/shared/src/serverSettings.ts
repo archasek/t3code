@@ -90,6 +90,9 @@ export function resolveSourceControlWriterModelSelection(
   if (!selection || !isModelSelectionProviderEnabled(settings, selection)) {
     return settings.textGenerationModelSelection;
   }
+  if (!isModelSelectionTextGenerationCapable(settings, selection)) {
+    return settings.textGenerationModelSelection;
+  }
   if (providers === undefined) {
     return selection;
   }
@@ -100,6 +103,14 @@ export function resolveSourceControlWriterModelSelection(
     isProviderTextGenerationCapable(provider)
     ? selection
     : settings.textGenerationModelSelection;
+}
+
+export function isModelSelectionTextGenerationCapable(
+  settings: ServerSettings,
+  selection: ModelSelection,
+): boolean {
+  const driver = settings.providerInstances[selection.instanceId]?.driver ?? selection.instanceId;
+  return driver !== "mastraCode" && driver !== "acpRegistry";
 }
 
 export interface PersistedServerObservabilitySettings {
@@ -363,6 +374,24 @@ export function applyServerSettingsPatch(
       : {}),
     ...(patch.providerInstances !== undefined
       ? { providerInstances: patch.providerInstances }
+      : {}),
+    ...(patch.worktreesDirectory !== undefined &&
+    patch.worktreesDirectory !== current.worktreesDirectory
+      ? {
+          previousWorktreesDirectories: [
+            ...current.previousWorktreesDirectories.filter(
+              (directory) => directory !== patch.worktreesDirectory,
+            ),
+            ...(current.worktreesDirectory !== "" &&
+            !current.previousWorktreesDirectories.includes(current.worktreesDirectory)
+              ? [current.worktreesDirectory]
+              : []),
+          ],
+        }
+      : {}),
+    // Host replacement: deepMerge would keep a cleared account pin.
+    ...(patch.github?.hosts !== undefined
+      ? { github: { ...next.github, hosts: patch.github.hosts } }
       : {}),
     ...(projectSettingsOverridesPatch !== undefined
       ? {

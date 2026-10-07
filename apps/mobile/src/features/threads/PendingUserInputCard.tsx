@@ -3,7 +3,14 @@ import { QuestionAttachments } from "./QuestionAttachments";
 import type { RuntimeRequestId } from "@t3tools/contracts";
 import type { ThreadUserInputQuestion } from "@t3tools/client-runtime/state/thread-requests";
 import { useCallback, useRef } from "react";
-import { Platform, Pressable, ScrollView, View, type LayoutChangeEvent } from "react-native";
+import {
+  Platform,
+  Pressable,
+  ScrollView,
+  TextInput,
+  View,
+  type LayoutChangeEvent,
+} from "react-native";
 import Animated, {
   Easing,
   FadeInUp,
@@ -322,17 +329,61 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                 })}
               </View>
               {question.allowCustomAnswer !== false ? (
-                <QuestionAttachments
-                  requestId={props.pendingUserInput.requestId}
-                  question={question}
-                  questions={props.pendingUserInput.questions}
-                  disabled={responseDisabled}
-                  value={draft?.customAnswer ?? ""}
-                  onChangeText={(value) =>
-                    props.onChangeCustomAnswer(props.pendingUserInput.requestId, question.id, value)
-                  }
-                  onInputFocusChange={props.onInputFocusChange}
-                />
+                question.answerFormat === "raw-string" ? (
+                  <View className="gap-2">
+                    <TextInput
+                      accessibilityLabel={`Literal value: ${question.header}`}
+                      value={draft?.customAnswer ?? ""}
+                      editable={!responseDisabled}
+                      onChangeText={(value) =>
+                        props.onChangeCustomAnswer(
+                          props.pendingUserInput.requestId,
+                          question.id,
+                          value,
+                        )
+                      }
+                      multiline
+                      autoCorrect={false}
+                      autoCapitalize="none"
+                      onFocus={() => props.onInputFocusChange?.(true)}
+                      onBlur={() => props.onInputFocusChange?.(false)}
+                      className="min-h-20 rounded-2xl border border-border bg-input p-3 text-foreground"
+                    />
+                    {question.allowEmptyAnswer === true ? (
+                      <Pressable
+                        accessibilityRole="button"
+                        disabled={responseDisabled}
+                        onPress={() =>
+                          props.onChangeCustomAnswer(
+                            props.pendingUserInput.requestId,
+                            question.id,
+                            "",
+                          )
+                        }
+                      >
+                        <Text className="font-sans text-sm text-foreground-secondary">
+                          Use empty value
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
+                ) : (
+                  <QuestionAttachments
+                    requestId={props.pendingUserInput.requestId}
+                    question={question}
+                    questions={props.pendingUserInput.questions}
+                    disabled={responseDisabled}
+                    value={draft?.customAnswer ?? ""}
+                    onChangeText={(value) =>
+                      props.onChangeCustomAnswer(
+                        props.pendingUserInput.requestId,
+                        question.id,
+                        value,
+                      )
+                    }
+                    onInputFocusChange={props.onInputFocusChange}
+                  />
+                )
               ) : null}
             </View>
           );

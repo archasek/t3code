@@ -2,6 +2,18 @@ import React, { type SVGProps, useId } from "react";
 import { cn } from "~/lib/utils";
 export type Icon = React.FC<SVGProps<SVGSVGElement>>;
 
+export const MastraCodeIcon: Icon = (props) => (
+  <svg viewBox="0 0 24 24" fill="none" {...props}>
+    <path
+      d="M4 18V6l4 6 4-6v12m0-6 4-6 4 6-4 6"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
 export const UltrafastIcon: Icon = (props) => (
   <svg viewBox="0 0 24 24" fill="currentColor" {...props}>
     <path d="m17 2-10 12h7l-1 8 10-12h-7l1-8Z" opacity="0.4" />

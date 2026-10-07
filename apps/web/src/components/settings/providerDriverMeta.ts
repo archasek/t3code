@@ -5,6 +5,7 @@ import {
   CodexSettings,
   CursorSettings,
   GrokSettings,
+  MastraCodeSettings,
   OpenCodeSettings,
   PiSettings,
   ProviderDriverKind,
@@ -47,6 +48,11 @@ export interface ProviderEnvironmentFieldDefinition {
 }
 
 const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
+  {
+    value: ProviderDriverKind.make("mastraCode"),
+    label: "Mastra Code",
+    settingsSchema: MastraCodeSettings,
+  },
   {
     value: ProviderDriverKind.make("codex"),
     label: "Codex",

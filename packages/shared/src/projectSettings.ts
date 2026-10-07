@@ -12,7 +12,7 @@ import {
   type ThreadEnvMode,
   type WorktreeCleanupRules,
 } from "@t3tools/contracts";
-import { isModelSelectionProviderEnabled } from "./serverSettings.ts";
+import { isModelSelectionProviderEnabled, isModelSelectionTextGenerationCapable } from "./serverSettings.ts";
 
 /**
  * Where a project-scoped value came from. The order is the priority order:
@@ -178,7 +178,8 @@ function resolveProjectOverrides(
       (key === "textGenerationModelSelection" || key === "defaultModelSelection") &&
       value !== undefined &&
       value !== null &&
-      !isModelSelectionProviderEnabled(settings, value as ModelSelection)
+      (!isModelSelectionProviderEnabled(settings, value as ModelSelection) ||
+        (key === "textGenerationModelSelection" && !isModelSelectionTextGenerationCapable(settings, value as ModelSelection)))
     ) {
       continue;
     }

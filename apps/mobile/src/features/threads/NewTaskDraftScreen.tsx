@@ -1,6 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import * as Cause from "effect/Cause";
-import { AsyncResult } from "effect/unstable/reactivity";
+import { AsyncResult } from "effect/reactivity";
 import { clampFileAttachmentUploadBytes } from "@t3tools/client-runtime/state/attachments";
 import {
   nextPastedTextFileName,
@@ -1222,6 +1222,7 @@ export function NewTaskDraftScreen(props: {
       resolveSelectableModelSelection(
         selectedEnvironmentServerConfig,
         draft.modelSelection ?? null,
+        flow.interactionMode,
       ) ?? flow.selectedModel;
     const workspaceMode = draft.workspaceSelection?.mode ?? flow.workspaceMode;
     const selectedBranchName = draft.workspaceSelection?.branch ?? flow.selectedBranchName;
