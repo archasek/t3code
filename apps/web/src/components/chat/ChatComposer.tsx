@@ -1,4 +1,3 @@
-import { resolveInteractionModeModel } from "@t3tools/shared/model";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { runtimeModeConfig, runtimeModeOptions as runtimeModes } from "./runtimeModeConfig";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
@@ -2151,28 +2150,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     provider: selectedProviderEntry?.snapshot ?? null,
     interactionMode: requestedInteractionMode,
   });
-  const { modelOptions: composerModelOptions, selectedModel: storedSelectedModel } =
-    useEffectiveComposerModelState({
-      threadRef: composerDraftTarget,
-      providers: providerStatuses,
-      selectedProvider,
-      selectedInstanceId,
-      threadModelSelection: activeThreadModelSelection,
-      projectModelSelection: activeProjectDefaultModelSelection,
-      settings,
-    });
-  const selectedModel =
-    selectedProvider === "mastraCode"
-      ? (resolveInteractionModeModel(
-          (selectedProviderEntry?.models ?? []).filter((model) => !model.isCustom),
-          storedSelectedModel,
-          interactionMode,
-        ) ?? "")
-      : storedSelectedModel;
-  const providerSendBlockReason =
-    selectedProvider === "mastraCode" && !selectedModel
-      ? "Choose a model available in this mode."
-      : getAntigravitySendBlockReason(selectedProviderEntry?.snapshot, selectedModel);
+  const { modelOptions: composerModelOptions, selectedModel } = useEffectiveComposerModelState({
+    threadRef: composerDraftTarget,
+    providers: providerStatuses,
+    selectedProvider,
+    selectedInstanceId,
+    threadModelSelection: activeThreadModelSelection,
+    projectModelSelection: activeProjectDefaultModelSelection,
+    settings,
+  });
+  const providerSendBlockReason = getAntigravitySendBlockReason(
+    selectedProviderEntry?.snapshot,
+    selectedModel,
+  );
   const sendDisabledReason =
     externalSendDisabledReason ??
     (multipleModelSelections?.length === 0 ? "Select at least one model." : null) ??
@@ -2186,12 +2176,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedProviderEntry],
   );
   const compactCommandAvailable = providerSupportsManualCompaction(selectedProviderEntry);
-  const selectedProviderSkills = selectedProviderStatus
-    ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd)
-    : [];
-  const selectedProviderSlashCommands = selectedProviderStatus
-    ? resolveProviderSlashCommandsForCwd(selectedProviderStatus, gitCwd)
-    : [];
+  // Memoized so the composer menu memo below can cache between renders.
+  const selectedProviderSkills = useMemo(
+    () =>
+      selectedProviderStatus ? resolveProviderSkillsForCwd(selectedProviderStatus, gitCwd) : [],
+    [gitCwd, selectedProviderStatus],
+  );
+  const selectedProviderSlashCommands = useMemo(
+    () =>
+      selectedProviderStatus
+        ? resolveProviderSlashCommandsForCwd(selectedProviderStatus, gitCwd)
+        : [],
+    [gitCwd, selectedProviderStatus],
+  );
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
@@ -2538,7 +2535,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const settledPullRequestTextQuery =
     pullRequestTextQuery === debouncedPullRequestTextQuery ? pullRequestTextQuery : null;
   const isPathTrigger = composerTriggerKind === "path";
-  const environmentThreadShells = useThreadShells();
+  // Thread shells only feed `@` thread matches, so skip shell updates otherwise.
+  const environmentThreadShells = useThreadShells(isPathTrigger);
   const workspaceEntries = useComposerPathSearch({
     environmentId,
     cwd: isPathTrigger ? gitCwd : null,
@@ -6617,11 +6615,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         : null}
       <ComposerBanner.Dock>
         <ComposerBanner.Column>
-          {props.queuedRunsControl}
           <ComposerBannerStack
             key={activeThreadId}
             className="relative z-0"
             items={bannerStackItems}
+            attachedAbove={props.queuedRunsControl}
           />
           {!activityStackItem && (shownSyncPhase || inlineTasksBadge) ? (
             <ComposerBanner.Attachment>

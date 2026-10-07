@@ -1,10 +1,10 @@
 import { ProviderDriverKind, type MastraCodeSettings } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import * as AcpErrors from "effect-acp/errors";
 import { makeMastraCodeAcpRuntime } from "../../provider/acp/MastraCodeAcpSupport.ts";
 import { withMastraCodeThreadStorage } from "../../provider/MastraCodeEnvironment.ts";
@@ -14,7 +14,7 @@ import {
   validateMastraCodeStringConstraints,
 } from "../../provider/MastraCodeElicitationValidation.ts";
 import { readMastraCodePlan } from "../../provider/MastraCodePlan.ts";
-import { checkMastraCodeProviderStatus } from "../../provider/Layers/MastraCodeProvider.ts";
+import { checkMastraCodeProviderStatus } from "../../provider/MastraCodeProvider.ts";
 import {
   applyMastraCodeModelSelection,
   applyMastraCodeThinkingSelection,
@@ -49,7 +49,7 @@ export function makeMastraCodeAdapterV2(options: MastraCodeAdapterV2Options) {
   const threadDirectory = (threadId: string) =>
     options.crypto.digest("SHA-256", new TextEncoder().encode(threadId)).pipe(
       Effect.map((digest) =>
-        options.path.join(options.appDataDirectory, "threads", Encoding.encodeHex(digest)),
+        options.path.join(options.appDataDirectory, "threads", Hex.encode(digest)),
       ),
       Effect.mapError(
         (cause) =>
@@ -76,8 +76,8 @@ export function makeMastraCodeAdapterV2(options: MastraCodeAdapterV2Options) {
     resolveModelId: (selection) => (selection.model === "default" ? undefined : selection.model),
     applyModelSelection: (input) =>
       Effect.gen(function* () {
-        // Setup-time ACP model lists omit native mode constraints. Qualify the
-        // running binary's catalog before applying an explicit model per mode.
+        // The native catalog owns admission; ACP owns the session's current
+        // model and options. Apply an explicit model before its reasoning level.
         if (["default", "auto", ""].includes(input.modelSelection.model)) {
           yield* applyMastraCodeThinkingSelection(input);
           return undefined;

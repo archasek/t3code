@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -21,7 +21,7 @@ import {
   checkMastraCodeProviderStatus,
   makeMastraCodeCommandCatalog,
   makeMastraCodeCatalogRefresh,
-} from "../Layers/MastraCodeProvider.ts";
+} from "../MastraCodeProvider.ts";
 import { makeMastraCodeAuth, resolveMastraCodeAppDataDirectory } from "../MastraCodeAuth.ts";
 import { buildMastraCodeEnvironment } from "../MastraCodeEnvironment.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";

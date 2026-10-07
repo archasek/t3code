@@ -6,19 +6,19 @@ import {
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
-import * as Encoding from "effect/Encoding";
+import * as Hex from "effect/encoding/Hex";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import * as ChildProcess from "effect/unstable/process/ChildProcess";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import * as ProviderAuthFlow from "./ProviderAuthFlow.ts";
-import type { ProviderAuthController } from "./Services/ProviderAuthService.ts";
+import type { ProviderAuthController } from "./ProviderAuthService.ts";
 
 const CODEX_PROVIDER = "openai-codex";
 const MAX_AUTH_OUTPUT_CHARS = 64 * 1024;
@@ -121,7 +121,7 @@ export const resolveMastraCodeAppDataDirectory = Effect.fn("resolveMastraCodeApp
     const crypto = yield* Crypto.Crypto;
     const path = yield* Path.Path;
     const digest = yield* crypto.digest("SHA-256", new TextEncoder().encode(instanceId));
-    const key = Encoding.encodeHex(digest);
+    const key = Hex.encode(digest);
     return path.join(stateDirectory, "providers", "mastracode", key);
   },
 );

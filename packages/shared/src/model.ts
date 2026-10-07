@@ -528,33 +528,7 @@ export function applyClaudePromptEffortPrefix(
   return `Ultrathink:\n${trimmed}`;
 }
 
-/** A reported model mode constraint remains authoritative for custom/stale selections. */
-export function modelSupportsInteractionMode(
-  model:
-    | { readonly supportedInteractionModes?: ReadonlyArray<"default" | "plan"> | undefined }
-    | undefined,
-  mode: "default" | "plan",
-): boolean {
-  return (
-    model?.supportedInteractionModes === undefined || model.supportedInteractionModes.includes(mode)
-  );
-}
-
-/** Keep a compatible pick; a mode switch clears it when no compatible model exists. */
-export function resolveInteractionModeModel(
-  models: ReadonlyArray<{
-    readonly slug: string;
-    readonly isDefault?: boolean | undefined;
-    readonly supportedInteractionModes?: ReadonlyArray<"default" | "plan"> | undefined;
-  }>,
-  selected: string | null | undefined,
-  mode: "default" | "plan",
-): string | null {
-  const compatible = models.filter((model) => modelSupportsInteractionMode(model, mode));
-  return (
-    compatible.find((model) => model.slug === selected)?.slug ??
-    compatible.find((model) => model.isDefault)?.slug ??
-    compatible[0]?.slug ??
-    null
-  );
+/** MC owns its session-wide default and rejects unavailable explicit IDs itself. */
+export function resolveMastraCodeModelSelection(selected: string | null | undefined): string {
+  return selected ?? "default";
 }

@@ -4,7 +4,7 @@ import { ProviderInstanceId, ProviderSetupError } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import * as Option from "effect/Option";
-import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
   isMastraCodeAuthLoginSuccessful,

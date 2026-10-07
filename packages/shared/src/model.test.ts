@@ -20,8 +20,7 @@ import {
   normalizeCustomModelSlug,
   normalizeModelSlug,
   modelSelectionsEqual,
-  modelSupportsInteractionMode,
-  resolveInteractionModeModel,
+  resolveMastraCodeModelSelection,
 } from "./model.ts";
 
 it("keeps the Codex catalog display formatting", () => {
@@ -366,20 +365,10 @@ describe("provider-reported option display", () => {
   });
 });
 
-it("resolves plan-only/build-only/both and unconstrained native models on mode changes", () => {
-  const models = [
-    { slug: "build", supportedInteractionModes: ["default"] as const, isDefault: true },
-    { slug: "plan", supportedInteractionModes: ["plan"] as const },
-    { slug: "both", supportedInteractionModes: ["default", "plan"] as const },
-    { slug: "unspecified" },
-  ];
-  expect(resolveInteractionModeModel(models, "build", "plan")).toBe("plan");
-  expect(resolveInteractionModeModel(models, "plan", "default")).toBe("build");
-  for (const mode of ["default", "plan"] as const) {
-    expect(resolveInteractionModeModel(models, "both", mode)).toBe("both");
-    expect(resolveInteractionModeModel(models, "unspecified", mode)).toBe("unspecified");
-    expect(modelSupportsInteractionMode(undefined, mode)).toBe(true);
+it("preserves MC native-default sentinels and explicit IDs without catalog substitution", () => {
+  for (const selection of ["default", "auto", "", "openai/gpt-6-luna", "removed-model"]) {
+    expect(resolveMastraCodeModelSelection(selection)).toBe(selection);
   }
-  expect(resolveInteractionModeModel([models[0]!], "build", "plan")).toBeNull();
-  expect(resolveInteractionModeModel([models[1]!], "custom-or-stale", "default")).toBeNull();
+  expect(resolveMastraCodeModelSelection(null)).toBe("default");
+  expect(resolveMastraCodeModelSelection(undefined)).toBe("default");
 });

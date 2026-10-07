@@ -131,46 +131,48 @@ it.effect("does not silently accept an explicit model without native discovery",
 
 it.effect.each([
   { modes: ["plan"] as const, mode: "plan" as const, allowed: true },
-  { modes: ["plan"] as const, mode: "default" as const, allowed: false },
-  { modes: ["default"] as const, mode: "plan" as const, allowed: false },
+  { modes: ["plan"] as const, mode: "default" as const, allowed: true },
+  { modes: ["default"] as const, mode: "plan" as const, allowed: true },
   { modes: ["default"] as const, mode: "default" as const, allowed: true },
   { modes: ["default", "plan"] as const, mode: "plan" as const, allowed: true },
   { modes: undefined, mode: "plan" as const, allowed: true },
-])("guards explicit model mode ($mode, $modes)", ({ modes, mode, allowed }) =>
-  Effect.gen(function* () {
-    const applied: string[] = [];
-    const result = yield* applyMastraCodeModelSelection({
-      runtime: {
-        setSessionModel: (id) =>
-          Effect.sync(() => {
-            applied.push(id);
-            return {};
-          }),
-      },
-      startResult: {
-        sessionSetupResult: {
-          sessionId: "native",
-          models: {
-            currentModelId: "model",
-            availableModels: [{ modelId: "model", name: "model" }],
+])(
+  "admits catalog/session members independently of pack mode recommendations ($mode, $modes)",
+  ({ modes, mode, allowed }) =>
+    Effect.gen(function* () {
+      const applied: string[] = [];
+      const result = yield* applyMastraCodeModelSelection({
+        runtime: {
+          setSessionModel: (id) =>
+            Effect.sync(() => {
+              applied.push(id);
+              return {};
+            }),
+        },
+        startResult: {
+          sessionSetupResult: {
+            sessionId: "native",
+            models: {
+              currentModelId: "model",
+              availableModels: [{ modelId: "model", name: "model" }],
+            },
           },
         },
-      },
-      modelSelection: { model: "model" },
-      interactionMode: mode,
-      models: [
-        {
-          slug: "model",
-          name: "model",
-          isCustom: false,
-          capabilities: null,
-          ...(modes ? { supportedInteractionModes: modes } : {}),
-        },
-      ],
-    }).pipe(Effect.result);
-    expect(result._tag).toBe(allowed ? "Success" : "Failure");
-    expect(applied).toEqual(allowed ? ["model"] : []);
-  }),
+        modelSelection: { model: "model" },
+        interactionMode: mode,
+        models: [
+          {
+            slug: "model",
+            name: "model",
+            isCustom: false,
+            capabilities: null,
+            ...(modes ? { supportedInteractionModes: modes } : {}),
+          },
+        ],
+      }).pipe(Effect.result);
+      expect(result._tag).toBe(allowed ? "Success" : "Failure");
+      expect(applied).toEqual(allowed ? ["model"] : []);
+    }),
 );
 
 it.effect.each([true, false])(

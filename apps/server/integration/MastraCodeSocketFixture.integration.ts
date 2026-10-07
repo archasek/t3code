@@ -2,15 +2,17 @@
 import * as NodeHttp from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import {
-  ORCHESTRATION_V2_WS_METHODS, OrchestrationV2RpcSchemas,
-  OrchestrationV2DispatchCommandError, OrchestrationV2GetThreadProjectionError,
+  ORCHESTRATION_V2_WS_METHODS,
+  OrchestrationV2RpcSchemas,
+  OrchestrationV2DispatchCommandError,
+  OrchestrationV2GetThreadProjectionError,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
-import { HttpRouter, HttpServer } from "effect/unstable/http";
-import { Rpc, RpcGroup, RpcServer, RpcSerialization } from "effect/unstable/rpc";
+import { HttpRouter, HttpServer } from "effect/http";
+import { Rpc, RpcGroup, RpcServer, RpcSerialization } from "effect/rpc";
 import * as Orchestrator from "../src/orchestration-v2/Orchestrator.ts";
 import * as ThreadMessageIntake from "../src/orchestration-v2/ThreadMessageIntake.ts";
 import { userFacingDispatchErrorMessage } from "../src/orchestration-v2/UserFacingErrors.ts";
@@ -22,14 +24,15 @@ import { openMeasuredWsClient } from "./NetworkTransferMeasurement.integration.t
 export const openMastraCodeSocketFixture = Effect.fn("MC.socketFixture")(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
   const intakeContext = yield* Effect.context<
-    Effect.Services<ReturnType<typeof ThreadMessageIntake.dispatchCommand>>
+    | Effect.Services<ReturnType<typeof ThreadMessageIntake.dispatchCommand>>
     | Effect.Services<ReturnType<typeof subscribeOrchestrationV2Thread>>
   >();
   const group = RpcGroup.make(
     Rpc.make(ORCHESTRATION_V2_WS_METHODS.subscribeThread, {
       payload: OrchestrationV2RpcSchemas.subscribeThread.input,
       success: OrchestrationV2RpcSchemas.subscribeThread.output,
-      error: OrchestrationV2GetThreadProjectionError, stream: true,
+      error: OrchestrationV2GetThreadProjectionError,
+      stream: true,
     }),
     Rpc.make(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, {
       payload: OrchestrationV2RpcSchemas.dispatchCommand.input,
@@ -49,25 +52,43 @@ export const openMastraCodeSocketFixture = Effect.fn("MC.socketFixture")(functio
       ThreadMessageIntake.dispatchCommand(command).pipe(
         Effect.provide(intakeContext),
         Effect.map((receipt) => ({ sequence: receipt.sequence })),
-        Effect.mapError((cause) => new OrchestrationV2DispatchCommandError({
-          commandId: command.commandId, commandType: command.type,
-          message: userFacingDispatchErrorMessage(cause) ?? "Command rejected by canonical intake",
-        })),
+        Effect.mapError(
+          (cause) =>
+            new OrchestrationV2DispatchCommandError({
+              commandId: command.commandId,
+              commandType: command.type,
+              message:
+                userFacingDispatchErrorMessage(cause) ?? "Command rejected by canonical intake",
+            }),
+        ),
       ),
     [ORCHESTRATION_V2_WS_METHODS.getThreadProjection]: (input) =>
       orchestrator.getThreadProjection(input.threadId).pipe(
-        Effect.mapError(() => new OrchestrationV2GetThreadProjectionError({
-          threadId: input.threadId, message: "Projection unavailable",
-        })),
+        Effect.mapError(
+          () =>
+            new OrchestrationV2GetThreadProjectionError({
+              threadId: input.threadId,
+              message: "Projection unavailable",
+            }),
+        ),
       ),
   });
-  const server = yield* Layer.build(HttpRouter.serve(
-    RpcServer.layerHttp({ group, path: "/ws", protocol: "websocket" }).pipe(
-      Layer.provide(handlers), Layer.provide(RpcSerialization.layerJson),
-    ), { disableListenLog: true },
-  ).pipe(Layer.provideMerge(NodeHttpServer.layer(NodeHttp.createServer, { host: "127.0.0.1", port: 0 }))));
+  const server = yield* Layer.build(
+    HttpRouter.serve(
+      RpcServer.layerHttp({ group, path: "/ws", protocol: "websocket" }).pipe(
+        Layer.provide(handlers),
+        Layer.provide(RpcSerialization.layerJson),
+      ),
+      { disableListenLog: true },
+    ).pipe(
+      Layer.provideMerge(
+        NodeHttpServer.layer(NodeHttp.createServer, { host: "127.0.0.1", port: 0 }),
+      ),
+    ),
+  );
   const address = Context.get(server, HttpServer.HttpServer).address;
   if (!("port" in address)) return yield* Effect.die("Expected loopback TCP server");
-  const connect = () => openMeasuredWsClient({ url: `ws://127.0.0.1:${address.port}/ws`, cookie: "" });
+  const connect = () =>
+    openMeasuredWsClient({ url: `ws://127.0.0.1:${address.port}/ws`, cookie: "" });
   return { connect };
 });

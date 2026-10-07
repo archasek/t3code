@@ -35,6 +35,7 @@ it.effect("refetches a replaced tail with unchanged count and wakes once for its
         headSha: "head",
         failedChecks: [],
         passed: false,
+        passedChecks: [],
         remarksThrough: COMMENTED,
         remarkIds: ["first", "old-tail"],
         conflicting: false,
@@ -44,6 +45,11 @@ it.effect("refetches a replaced tail with unchanged count and wakes once for its
     let thread: ProjectionStore.ProjectionThreadPullRequests = {
       id: ThreadId.make("watch-thread"),
       projectId: ProjectId.make("project"),
+      lineage: {
+        parentThreadId: null,
+        relationshipToParent: null,
+        rootThreadId: ThreadId.make("watch-thread"),
+      },
       settledAt: null,
       settledOverride: null,
       pullRequests: [link],
@@ -112,6 +118,7 @@ it.effect("refetches a replaced tail with unchanged count and wakes once for its
     };
     const dependencies = Layer.mergeAll(
       Layer.mock(PullRequestService.PullRequestService)({
+        watchFingerprint: () => Effect.succeed(null),
         detail: () => Effect.succeed(detail),
         activity: () =>
           Effect.succeed({

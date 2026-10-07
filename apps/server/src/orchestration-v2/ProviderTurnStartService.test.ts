@@ -26,7 +26,7 @@ import * as Schema from "effect/Schema";
 
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
-import * as ProviderAuthService from "../provider/Services/ProviderAuthService.ts";
+import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
@@ -663,15 +663,20 @@ effectIt.effect("does not overwrite a run interrupted while its provider session
 effectIt.effect("fails an MC resume instead of attempting a history-only replacement", () =>
   Effect.gen(function* () {
     const harness = makeLocalCommandHarness({
-      text: "Continue", driver: "mastraCode",
+      text: "Continue",
+      driver: "mastraCode",
       historyReadFailureAfterFallback: new Error("history must not be read for a replacement"),
     });
     yield* harness.start;
     expect(harness.ensureReplacementThread).not.toHaveBeenCalled();
     expect(harness.startRootRun).not.toHaveBeenCalled();
     expect(harness.projection().runs.at(-1)?.status).toBe("failed");
-    expect(harness.projection().providerThreads.at(-1)?.nativeThreadRef?.nativeId).toBe("native-resume-thread");
-    expect(harness.projection().turnItems).toMatchObject([{ type: "error", failure: { message: "native thread is gone" } }]);
+    expect(harness.projection().providerThreads.at(-1)?.nativeThreadRef?.nativeId).toBe(
+      "native-resume-thread",
+    );
+    expect(harness.projection().turnItems).toMatchObject([
+      { type: "error", failure: { message: "native thread is gone" } },
+    ]);
   }),
 );
 

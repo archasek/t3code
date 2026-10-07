@@ -4,7 +4,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Scope from "effect/Scope";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -15,7 +15,11 @@ import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 
 export interface MastraCodeAcpRuntimeInput extends Omit<
   AcpSessionRuntime.AcpSessionRuntimeOptions,
-  "authMethodId" | "authenticateOnAuthRequired" | "sessionLoadRequireRpcResponse" | "clientCapabilities" | "spawn"
+  | "authMethodId"
+  | "authenticateOnAuthRequired"
+  | "sessionLoadRequireRpcResponse"
+  | "clientCapabilities"
+  | "spawn"
 > {
   readonly childProcessSpawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
   readonly settings: { readonly binaryPath?: string };

@@ -10,7 +10,7 @@ import * as Stream from "effect/Stream";
 import * as Path from "effect/Path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodePath from "@effect/platform-node/NodePath";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import { describe, expect, it } from "@effect/vitest";
 import { prepareMastraCodeForm } from "./MastraCodeForm.ts";
 import {

@@ -14,7 +14,7 @@ import {
   normalizeCustomModelSlug,
   readCustomModelEntries,
   resolveSelectableModel,
-  resolveInteractionModeModel,
+  resolveMastraCodeModelSelection,
 } from "@t3tools/shared/model";
 import { getComposerProviderState } from "./components/chat/composerProviderState";
 import { UnifiedSettings } from "@t3tools/contracts/settings";
@@ -98,7 +98,13 @@ function appendUnavailableDynamicModelSelection(
   selectedModel: string | null | undefined,
   hiddenModels: ReadonlyArray<string>,
 ): AppModelOption[] {
-  if (provider !== "opencode" && provider !== "antigravity") return options;
+  if (provider !== "opencode" && provider !== "antigravity" && provider !== "mastraCode")
+    return options;
+  if (
+    provider === "mastraCode" &&
+    (selectedModel === "default" || selectedModel === "auto" || selectedModel === "")
+  )
+    return options;
   const slug = normalizeCustomModelSlug(selectedModel);
   if (!slug) return options;
   if (provider === "antigravity" && slug === ANTIGRAVITY_DEFAULT_MODEL) return options;
@@ -279,6 +285,7 @@ export function resolveAppModelSelection(
   selectedModel: string | null | undefined,
 ): string {
   const resolvedProvider = resolveSelectableProvider(providers, provider);
+  if (resolvedProvider === "mastraCode") return resolveMastraCodeModelSelection(selectedModel);
   const options = getAppModelOptions(settings, providers, resolvedProvider, selectedModel);
   return (
     resolveSelectableModel(resolvedProvider, selectedModel, options) ??
@@ -300,13 +307,7 @@ export function resolveAppModelSelectionForInstance(
     (candidate) => candidate.instanceId === instanceId,
   );
   if (!entry) return null;
-  if (entry.driverKind === "mastraCode" && resolutionOptions?.interactionMode !== undefined) {
-    return resolveInteractionModeModel(
-      entry.models.filter((model) => !model.isCustom),
-      selectedModel,
-      resolutionOptions.interactionMode,
-    );
-  }
+  if (entry.driverKind === "mastraCode") return resolveMastraCodeModelSelection(selectedModel);
   const options = getAppModelOptionsForInstance(
     settings,
     entry,

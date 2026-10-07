@@ -4,7 +4,7 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as EffectAcpErrors from "effect-acp/errors";
-import { ChildProcess } from "effect/unstable/process";
+import { ChildProcess } from "effect/process";
 import { HostProcessIsExecutable } from "@t3tools/shared/hostProcess";
 import { spawnAndCollect } from "./providerSnapshot.ts";
 import { MastraElicitationValidationInput } from "../mastraElicitationWorker.ts";
@@ -34,7 +34,14 @@ export const acquireMastraCodeFormAdmission = Effect.fn("acquireMastraCodeFormAd
 );
 
 export const validateMastraCodeStringConstraints = Effect.fn("validateMastraCodeStringConstraints")(
-  function* (property: { readonly type: string; readonly pattern?: string | null | undefined; readonly format?: "email" | "uri" | "date" | "date-time" | null | undefined }, answer: unknown) {
+  function* (
+    property: {
+      readonly type: string;
+      readonly pattern?: string | null | undefined;
+      readonly format?: "email" | "uri" | "date" | "date-time" | null | undefined;
+    },
+    answer: unknown,
+  ) {
     if (property.type !== "string" || typeof answer !== "string") return true;
     if (property.pattern == null && property.format == null) return true;
     const input = encodeInput({

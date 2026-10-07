@@ -905,7 +905,54 @@ describe("resolveAppModelSelectionState with the opencode plan agent", () => {
   });
 });
 
-it("web mode resolution keeps all native MC modes and invalidates incompatible/custom picks", () => {
+it.each(["default", "auto", "", "openai/removed-model", "openai/gpt-6-luna"])(
+  "keeps MC %j through project, thread and draft composer resolution",
+  (model) => {
+    const instanceId = ProviderInstanceId.make("mastraCode");
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS };
+    const providers = [
+      provider({
+        provider: ProviderDriverKind.make("mastraCode"),
+        instanceId,
+        models: ["openai/gpt-6.1-sol", "openai/gpt-5.6-sol", "openai/gpt-6-luna"],
+      }),
+    ];
+    for (const mode of ["default", "plan"] as const) {
+      expect(
+        resolveAppModelSelectionForInstance(instanceId, settings, providers, model, {
+          interactionMode: mode,
+        }),
+      ).toBe(model);
+    }
+    const selection = { instanceId, model };
+    for (const source of ["project", "thread", "draft"] as const) {
+      const state = deriveEffectiveComposerModelState({
+        draft:
+          source === "draft"
+            ? { activeProvider: instanceId, modelSelectionByProvider: { [instanceId]: selection } }
+            : null,
+        selectedProvider: ProviderDriverKind.make("mastraCode"),
+        selectedInstanceId: instanceId,
+        projectModelSelection: source === "project" ? selection : null,
+        threadModelSelection: source === "thread" ? selection : null,
+        providers,
+        settings,
+      });
+      expect(state.selectedModel).toBe(model);
+    }
+    if (model === "openai/removed-model") {
+      expect(
+        getAppModelOptionsForInstance(
+          settings,
+          deriveProviderInstanceEntries(providers)[0]!,
+          model,
+        ),
+      ).toContainEqual(expect.objectContaining({ slug: model, isUnavailable: true }));
+    }
+  },
+);
+
+it("web MC resolution preserves session-wide models and native-default intent across modes", () => {
   const instanceId = ProviderInstanceId.make("mastraCode");
   const settings = { ...DEFAULT_UNIFIED_SETTINGS };
   const providers = [
@@ -947,12 +994,12 @@ it("web mode resolution keeps all native MC modes and invalidates incompatible/c
     resolveAppModelSelectionForInstance(instanceId, settings, providers, "build", {
       interactionMode: "plan",
     }),
-  ).toBe("plan");
+  ).toBe("build");
   expect(
     resolveAppModelSelectionForInstance(instanceId, settings, providers, "plan", {
       interactionMode: "default",
     }),
-  ).toBe("build");
+  ).toBe("plan");
   expect(
     resolveAppModelSelectionForInstance(instanceId, settings, providers, "both", {
       interactionMode: "plan",
@@ -967,7 +1014,7 @@ it("web mode resolution keeps all native MC modes and invalidates incompatible/c
     resolveAppModelSelectionForInstance(instanceId, settings, providers, "custom", {
       interactionMode: "plan",
     }),
-  ).toBe("plan");
+  ).toBe("custom");
   const planOnly = providers.map((provider) => ({
     ...provider,
     models: provider.models.filter((model) => model.slug === "plan"),
@@ -976,5 +1023,5 @@ it("web mode resolution keeps all native MC modes and invalidates incompatible/c
     resolveAppModelSelectionForInstance(instanceId, settings, planOnly, "stale", {
       interactionMode: "default",
     }),
-  ).toBeNull();
+  ).toBe("stale");
 });

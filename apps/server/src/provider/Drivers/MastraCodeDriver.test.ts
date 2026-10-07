@@ -13,12 +13,12 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import { ChildProcessSpawner } from "effect/process";
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import * as ServerConfig from "../../config.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as IdAllocator from "../../orchestration-v2/IdAllocator.ts";
-import { makeProviderInstanceRegistry } from "../Layers/ProviderInstanceRegistryLive.ts";
+import { makeProviderInstanceRegistry } from "../ProviderInstanceRegistry.ts";
 import { MastraCodeDriver } from "./MastraCodeDriver.ts";
 import { writeFakeCli } from "../../testUtils/fakeCli.ts";
 

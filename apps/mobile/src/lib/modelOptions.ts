@@ -8,8 +8,6 @@ import type {
 import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
   getProviderOptionDescriptors,
-  resolveInteractionModeModel,
-  modelSupportsInteractionMode,
 } from "@t3tools/shared/model";
 
 export type ModelOption = {
@@ -103,7 +101,7 @@ export function isModelSelectionUnavailable(
 export function resolveSelectableModelSelection(
   config: T3ServerConfig | null | undefined,
   selection: ModelSelection | null,
-  interactionMode: "default" | "plan" = "default",
+  _interactionMode: "default" | "plan" = "default",
 ): ModelSelection | null {
   if (!selection || !config) {
     return selection;
@@ -122,16 +120,7 @@ export function resolveSelectableModelSelection(
     provider.installed &&
     provider.auth.status !== "unauthenticated"
   ) {
-    const model = resolveInteractionModeModel(
-      provider.models.filter((model) => !model.isCustom),
-      selection.model,
-      interactionMode,
-    );
-    return model === selection.model
-      ? selection
-      : model
-        ? { instanceId: selection.instanceId, model }
-        : null;
+    return selection;
   }
   return provider &&
     provider.enabled &&
@@ -166,30 +155,22 @@ export function resolveNewTaskModelSelection(input: {
   readonly stickySelection: ModelSelection | null;
   readonly modelOptions: ReadonlyArray<ModelOption>;
 }): ModelSelection | null {
-  const compatibleSelection = (selection: ModelSelection | null) => {
-    if (!selection) return null;
-    const option = input.modelOptions.find(
-      (option) =>
-        option.selection.instanceId === selection?.instanceId &&
-        option.selection.model === selection.model,
-    );
-    return option?.providerDriver === "mastraCode" && option.isUnavailable ? null : selection;
-  };
-  return (
-    compatibleSelection(input.draftSelection) ??
-    compatibleSelection(input.projectDefaultSelection) ??
-    compatibleSelection(input.stickySelection) ??
-    input.modelOptions.find((option) => option.isDefault && !option.isUnavailable)?.selection ??
-    input.modelOptions.find((option) => !option.isUnavailable)?.selection ??
-    null
-  );
+  const stored = input.draftSelection ?? input.projectDefaultSelection ?? input.stickySelection;
+  if (stored) return stored;
+  const fallback =
+    input.modelOptions.find((option) => option.isDefault && !option.isUnavailable) ??
+    input.modelOptions.find((option) => !option.isUnavailable);
+  if (!fallback) return null;
+  return fallback.providerDriver === "mastraCode"
+    ? { instanceId: fallback.selection.instanceId, model: "default" }
+    : fallback.selection;
 }
 
 export function buildModelOptions(
   config: T3ServerConfig | null | undefined,
   fallbackModelSelection: ModelSelection | null,
   providerInstanceId?: ModelSelection["instanceId"],
-  interactionMode: "default" | "plan" = "default",
+  _interactionMode: "default" | "plan" = "default",
 ): ReadonlyArray<ModelOption> {
   const options = new Map<string, ModelOption>();
 
@@ -206,8 +187,6 @@ export function buildModelOptions(
 
     const providerLabel = providerDisplayLabel(provider);
     for (const model of provider.models) {
-      const modeUnavailable =
-        provider.driver === "mastraCode" && !modelSupportsInteractionMode(model, interactionMode);
       const customUnavailable = provider.driver === "mastraCode" && model.isCustom;
       const key = `${provider.instanceId}:${model.slug}`;
       options.set(key, {
@@ -215,10 +194,8 @@ export function buildModelOptions(
         label: model.name,
         subtitle: customUnavailable
           ? "Model not reported by Mastra Code."
-          : modeUnavailable
-            ? `Available in ${model.supportedInteractionModes?.map((mode) => (mode === "plan" ? "Plan" : "Build")).join(" or ") || "no supported"} mode.`
-            : (model.subProvider ?? ""),
-        ...(modeUnavailable || customUnavailable ? { isUnavailable: true } : {}),
+          : (model.subProvider ?? ""),
+        ...(customUnavailable ? { isUnavailable: true } : {}),
         providerKey: provider.instanceId,
         providerLabel,
         providerDriver: provider.driver,
@@ -242,8 +219,6 @@ export function buildModelOptions(
 
   if (
     fallbackModelSelection &&
-    config?.providers.find((provider) => provider.instanceId === fallbackModelSelection.instanceId)
-      ?.driver !== "mastraCode" &&
     (providerInstanceId === undefined || fallbackModelSelection.instanceId === providerInstanceId)
   ) {
     const key = `${fallbackModelSelection.instanceId}:${fallbackModelSelection.model}`;
@@ -280,7 +255,10 @@ export function buildModelOptions(
         providerDriver,
         isDefault: false,
         isLegacy: model?.isLegacy === true,
-        ...(isModelSelectionUnavailable(config, fallbackModelSelection)
+        ...(isModelSelectionUnavailable(config, fallbackModelSelection) ||
+        (providerDriver === "mastraCode" &&
+          !model &&
+          !["default", "auto", ""].includes(fallbackModelSelection.model))
           ? { isUnavailable: true }
           : {}),
         capabilities: model?.capabilities ?? null,

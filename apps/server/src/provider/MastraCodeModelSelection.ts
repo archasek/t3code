@@ -1,6 +1,5 @@
 import * as Effect from "effect/Effect";
 import * as AcpErrors from "effect-acp/errors";
-import { modelSupportsInteractionMode } from "@t3tools/shared/model";
 import type { ServerProviderModel, ModelSelection } from "@t3tools/contracts";
 import type { AcpSessionRuntime, AcpSessionRuntimeStartResult } from "./acp/AcpSessionRuntime.ts";
 
@@ -42,14 +41,14 @@ export const applyMastraCodeModelSelection = (input: {
     const models = startResult.sessionSetupResult.models;
     const selected = modelSelection.model;
     if (selected === "default" || selected === "auto" || selected === "") {
-      // Mode switching can replace the current model; setup-time metadata is
-      // not evidence of the native model now running.
+      // Keep the native session's saved/default model. Setup-time metadata is
+      // not evidence of the current selection after configuration updates.
       return undefined;
     }
     const catalogModel = input.models.find((model) => model.slug === selected && !model.isCustom);
-    if (!catalogModel || !modelSupportsInteractionMode(catalogModel, input.interactionMode)) {
+    if (!catalogModel) {
       return yield* AcpErrors.AcpRequestError.invalidParams(
-        "Mastra Code model is unavailable in this interaction mode. Refresh the model list.",
+        "Mastra Code model is unavailable. Refresh the model list.",
       );
     }
     if (!models?.availableModels.some((model) => model.modelId === selected)) {
@@ -57,8 +56,8 @@ export const applyMastraCodeModelSelection = (input: {
         "Mastra Code model is unavailable in this session.",
       );
     }
-    // Explicit selection must reach the current native mode even when the
-    // original session setup happened to advertise the same model.
+    // Explicit selection must reach the native session even when its original
+    // setup happened to advertise the same model.
     yield* runtime.setSessionModel(selected);
     return selected;
   });
